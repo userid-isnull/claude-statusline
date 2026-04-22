@@ -3,13 +3,13 @@
 Custom two-line status display for Claude Code on Windows.
 
 ```
- ▓▓▓░░░░░░░ 27% / 200K | ↑54K ↓12K | 5h ▓░░░ 18% 14:30 | 7d ░░░░ 3% Thu
+ ▓▓▓░░░░░░░ 27% / 200K | ↑54K ↓12K | 5h ▓░░░ 18% 14:30 | 7d ░░░░ 3% Thu | 7dS ▓░░░ 21% Thu
  my-project  main [+!] | a1b2c3d4
 ```
 
 ## What it shows
 
-**Line 1** — Context window usage bar and percentage, context size, input/output token counts, 5-hour and 7-day rate limit bars with reset times.
+**Line 1** — Context window usage bar and percentage, context size, input/output token counts, 5-hour and 7-day rate limit bars with reset times. When Claude Code exposes it, a `7dS` bar shows the Sonnet-only weekly usage that matches the "Sonnet" meter on [claude.ai/settings/usage](https://claude.ai/settings/usage).
 
 **Line 2** — Git repo name, branch (or worktree name), status icons (`+` staged, `!` modified, `?` untracked), working directory (if different from project root), and session ID. When connected via SSH, shows a color-coded `user@host` prefix using your Starship palette.
 
@@ -129,3 +129,4 @@ The statusline config is read at startup. If you changed settings after launchin
 - Git status is cached for 5 seconds in `%TEMP%\claude-sl-git.txt` to keep the statusline snappy.
 - SSH host color is pulled from your `starship.toml` palette (`color1` key).
 - Line 2 wraps the session ID to a third line if the total exceeds 90 characters.
+- Rate limit meters (`5h`, `7d`, `7dS`) are only rendered when the corresponding field is present in the stdin JSON. They appear for Claude.ai Pro/Max subscribers after the first API response. The `7dS` (Sonnet-only weekly) meter reads `rate_limits.seven_day_sonnet.used_percentage`; Claude Code only started exposing per-model fields recently, so if your version pipes only `five_hour`/`seven_day`, the `7dS` bar stays hidden until you update.

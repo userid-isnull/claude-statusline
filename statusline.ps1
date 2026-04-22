@@ -22,6 +22,8 @@ $rl5pct = $js.rate_limits.five_hour.used_percentage
 $rl5rst = $js.rate_limits.five_hour.resets_at
 $rl7pct = $js.rate_limits.seven_day.used_percentage
 $rl7rst = $js.rate_limits.seven_day.resets_at
+$rlSpct = $js.rate_limits.seven_day_sonnet.used_percentage
+$rlSrst = $js.rate_limits.seven_day_sonnet.resets_at
 
 # --- Helpers ---
 
@@ -61,6 +63,12 @@ if ($null -ne $rl7pct -and $null -ne $rl7rst) {
     $resetDt = [DateTimeOffset]::FromUnixTimeSeconds([long]$rl7rst).LocalDateTime
     $rl7when = if ($resetDt.Date -eq [DateTime]::Today) { $resetDt.ToString('HH:mm') } else { $resetDt.ToString('ddd') }
     $line1 += " | 7d $(Mk-Bar $p 4 25) $p% $rl7when"
+}
+if ($null -ne $rlSpct -and $null -ne $rlSrst) {
+    $p = [math]::Floor($rlSpct)
+    $resetDt = [DateTimeOffset]::FromUnixTimeSeconds([long]$rlSrst).LocalDateTime
+    $rlSwhen = if ($resetDt.Date -eq [DateTime]::Today) { $resetDt.ToString('HH:mm') } else { $resetDt.ToString('ddd') }
+    $line1 += " | 7dS $(Mk-Bar $p 4 25) $p% $rlSwhen"
 }
 
 
