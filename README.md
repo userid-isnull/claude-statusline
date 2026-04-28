@@ -1,6 +1,9 @@
 # claude-statusline
 
-Custom two-line status display for Claude Code on Windows.
+Custom two-line status display for Claude Code. PowerShell variant
+for Windows (`statusline.ps1`); bash variant for Linux / macOS
+(`statusline.sh`). Both render the same two-line layout from the
+JSON Claude Code feeds the statusline command on stdin.
 
 ```
  ▓▓▓░░░░░░░ 27% / 200K | ↑54K ↓12K | 5h ▓░░░ 18% 14:30 | 7d ░░░░ 3% Thu
@@ -15,14 +18,15 @@ Custom two-line status display for Claude Code on Windows.
 
 ## Requirements
 
-- Windows with PowerShell 5.1+
-- Claude Code with statusLine support
-- A [Nerd Font](https://www.nerdfonts.com/) for the branch glyph (optional but recommended)
-- [Starship](https://starship.rs/) with a palette for SSH host coloring (optional)
+**Windows**: PowerShell 5.1+. **Linux / macOS**: bash + `jq`.
+Both: Claude Code with `statusLine` support; a
+[Nerd Font](https://www.nerdfonts.com/) for the branch glyph
+(optional but recommended); [Starship](https://starship.rs/) with a
+palette for SSH host coloring (optional).
 
 ## Install
 
-### Quick
+### Windows (quick)
 
 ```powershell
 git clone https://github.com/userid-isnull/claude-statusline
@@ -30,13 +34,41 @@ cd claude-statusline
 powershell -NoProfile -File install.ps1
 ```
 
-The installer copies `statusline.ps1` to `~/.claude/` and adds the statusLine config to `~/.claude/settings.local.json`.
+The installer copies `statusline.ps1` to `~/.claude/` and adds the
+statusLine config to `~/.claude/settings.local.json`.
+
+### Linux / macOS (quick)
+
+```bash
+git clone https://github.com/userid-isnull/claude-statusline
+cd claude-statusline
+bash install.sh
+```
+
+The installer copies `statusline.sh` to `~/.claude/`, sets
+`statusLine` in `~/.claude/settings.local.json`, and adds the
+matching `permissions.allow` entry. Idempotent — safe to re-run.
+
+### Side-effect: rate-limit JSON dump
+
+`statusline.sh` (Linux / macOS only) tees the JSON payload it
+receives from Claude Code to `/tmp/statusline-${session_id}.json`
+and `/tmp/statusline-latest.json` before rendering. This is the
+only practical way to read the live `rate_limits.*` values
+out-of-band — Claude Code only exposes them to the statusline
+command, not to hooks, stream-json, or `/status` in `-p` mode. The
+dump files are tiny (~1 KB), gitignored by your shell's `/tmp`, and
+overwritten on every render.
 
 ### Manual
 
-1. Copy `statusline.ps1` to `~/.claude/statusline.ps1`
+1. Copy the appropriate script to `~/.claude/`:
+   - Windows: `statusline.ps1`
+   - Linux / macOS: `statusline.sh` (must be executable)
 
 2. Add to `~/.claude/settings.local.json`:
+
+   Windows:
    ```json
    {
      "statusLine": {
@@ -47,7 +79,21 @@ The installer copies `statusline.ps1` to `~/.claude/` and adds the statusLine co
    }
    ```
 
-3. Add `"Bash(~/.claude/statusline.ps1)"` to `permissions.allow` in `~/.claude/settings.json` or `settings.local.json` so Claude Code can run the script without prompting.
+   Linux / macOS:
+   ```json
+   {
+     "statusLine": {
+       "type": "command",
+       "command": "~/.claude/statusline.sh",
+       "padding": 1
+     }
+   }
+   ```
+
+3. Add the corresponding `Bash(~/.claude/statusline.{sh|ps1})`
+   entry to `permissions.allow` in `~/.claude/settings.json` or
+   `settings.local.json` so Claude Code can run the script without
+   prompting.
 
 4. Restart Claude Code.
 
