@@ -2,19 +2,46 @@
 
 Custom two-line status display for Claude Code. PowerShell variant
 for Windows (`statusline.ps1`); bash variant for Linux / macOS
-(`statusline.sh`). Both render the same two-line layout from the
-JSON Claude Code feeds the statusline command on stdin.
+(`statusline.sh`).
 
 ```
- ▓▓▓░░░░░░░ 27% / 200K | ↑54K ↓12K | 5h ▓░░░ 18% 14:30 | 7d ░░░░ 3% Thu
+ ▓░░░ 27% (54K) / 200K | 5h ▓░░░ 18% 14:30 | 7d ▓▓▓░░░░ 41%/51% Wed (4d)
  my-project  main [+!] | a1b2c3d4
 ```
 
+> The PowerShell variant has been redesigned per the layout above. The bash
+> variant still renders the older layout (10-segment context bar, 4-segment
+> 7d bar, ↑/↓ tokens, no pace meter); it will be ported in a separate
+> `feat/fss-wsl/...` branch.
+
 ## What it shows
 
-**Line 1** — Context window usage bar and percentage, context size, input/output token counts, 5-hour and 7-day rate limit bars with reset times.
+**Line 1 (PowerShell variant)**
+
+- **Context bar (4 segments)** — filled-count and color encode the **token count in the current session** as danger-zone bands, not percentage tenths:
+  - `< 100K` → 1 segment, default color
+  - `100K–200K` → 2 segments, yellow
+  - `200K–350K` → 3 segments, red
+  - `≥ 350K` → 4 segments, vivid magenta
+- **Used percentage and token count**, e.g. `27% (54K)`, followed by the context window size.
+- **5-hour rate-limit bar** (4 segments) with percent and reset time.
+- **7-day rate-limit bar (7 segments)** with `<actual>%/<pace>%`. *Pace* is where you'd be in the 168-hour window if usage were perfectly uniform — derived from how much time has elapsed since the last reset. When actual is below pace, the segments between the actual-filled run and the pace position are shaded **green** to show the buffer you have in hand.
+- **Reset slot** — day-of-week (`Wed`) when ≥ 24 h to reset, or reset time (`19:10`) when < 24 h.
+- **Countdown** — parenthesized: `(4d)` when ≥ 24 h remain (whole days), `(3h)` when < 24 h (whole hours).
 
 **Line 2** — Git repo name, branch (or worktree name), status icons (`+` staged, `!` modified, `?` untracked), working directory (if different from project root), and session ID. When connected via SSH, shows a color-coded `user@host` prefix using your Starship palette.
+
+## Tests (PowerShell variant)
+
+Pester 5+ test suite under `tests/`:
+
+```powershell
+powershell -NoProfile -File tests\run.ps1
+```
+
+Tests use a `-NowEpoch` script parameter on `statusline.ps1` so pace and
+countdown calculations are deterministic. Production renders use the system
+clock; the parameter is for test injection only.
 
 ## Requirements
 
