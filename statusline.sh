@@ -15,17 +15,30 @@ printf '%s\n' "$__rl_payload" >"/tmp/statusline-latest.json" 2>/dev/null
 exec < <(printf '%s' "$__rl_payload")
 
 RST=$'\033[0m'
-BRANCH=$'\ue0a0'
+BRANCH=$''
+GRN=$'\033[32m'
+YEL=$'\033[33m'
+RED=$'\033[31m'
+MAG=$'\033[95m'
+
+# Now-epoch resolution: env override (deterministic tests) or system clock.
+now=${STATUSLINE_NOW_EPOCH:-$(date +%s)}
 
 # --- Extract all fields from JSON stdin in one jq call ---
-IFS=$'\x1f' read -r used_pct ctx_size in_tok out_tok proj_dir cur_dir \
-  session_id wt_name \
+IFS=$'\x1f' read -r model_name effort_level used_pct ctx_size \
+  cu_in cu_out cu_cc cu_cr \
+  proj_dir cur_dir session_id wt_name \
   rl_5h_pct rl_5h_reset rl_7d_pct rl_7d_reset \
+  rl_s7d_pct rl_s7d_reset \
   <<< "$(jq -r '[
+    (.model.display_name // ""),
+    (.effort.level // ""),
     (.context_window.used_percentage // 0 | floor),
     (.context_window.context_window_size // 200000),
-    (.context_window.total_input_tokens // 0),
-    (.context_window.total_output_tokens // 0),
+    (.context_window.current_usage.input_tokens // 0),
+    (.context_window.current_usage.output_tokens // 0),
+    (.context_window.current_usage.cache_creation_input_tokens // 0),
+    (.context_window.current_usage.cache_read_input_tokens // 0),
     (.workspace.project_dir // ""),
     (.workspace.current_dir // .cwd // ""),
     (.session_id // ""),
@@ -33,13 +46,21 @@ IFS=$'\x1f' read -r used_pct ctx_size in_tok out_tok proj_dir cur_dir \
     (.rate_limits.five_hour.used_percentage // "" | if type == "number" then floor | tostring else . end),
     (.rate_limits.five_hour.resets_at // ""),
     (.rate_limits.seven_day.used_percentage // "" | if type == "number" then floor | tostring else . end),
-    (.rate_limits.seven_day.resets_at // "")
-  ] | join("\u001f")')"
+    (.rate_limits.seven_day.resets_at // ""),
+    ((.rate_limits.seven_day_sonnet.used_percentage // .rate_limits.seven_day.sonnet.used_percentage // "") | if type == "number" then floor | tostring else . end),
+    (.rate_limits.seven_day_sonnet.resets_at // .rate_limits.seven_day.sonnet.resets_at // "")
+  ] | join("")')"
 
 used_pct=${used_pct:-0}
 ctx_size=${ctx_size:-200000}
-in_tok=${in_tok:-0}
-out_tok=${out_tok:-0}
+
+# Prefer the exact token count from context_window.current_usage (sum of
+# input + output + cache_creation + cache_read). Falls back to the
+# rounded-percentage estimate when the field is absent (early in session).
+cur_tokens=$(( ${cu_in:-0} + ${cu_out:-0} + ${cu_cc:-0} + ${cu_cr:-0} ))
+if [ "$cur_tokens" -le 0 ]; then
+  cur_tokens=$(( used_pct * ctx_size / 100 ))
+fi
 
 # --- Helpers ---
 
@@ -58,6 +79,7 @@ epoch_fmt() {
   date -d "@$1" +"$2" 2>/dev/null || date -r "$1" +"$2" 2>/dev/null || printf '???'
 }
 
+# Generic bar (used for the 5h segment): width chars, integer divisor.
 make_bar() {
   local pct=${1:-0} width=$2 divisor=$3
   local filled=$(( (pct + divisor / 2) / divisor ))
@@ -70,14 +92,115 @@ make_bar() {
   printf '%s' "$bar"
 }
 
+# Token-count danger-zone bands for the context bar (4 segments).
+# < 100K: 1 segment, default; 100K-200K: 2, yellow;
+# 200K-350K: 3, red; >= 350K: 4, vivid magenta.
+# Output: "<filled>\x1f<ansi>"  (ansi may be empty)
+get_ctx_band() {
+  local t=$1
+  if   [ "$t" -ge 350000 ]; then printf '%s\x1f%s' 4 "$MAG"
+  elif [ "$t" -ge 200000 ]; then printf '%s\x1f%s' 3 "$RED"
+  elif [ "$t" -ge 100000 ]; then printf '%s\x1f%s' 2 "$YEL"
+  else                            printf '%s\x1f%s' 1 ""
+  fi
+}
+
+render_ctx_bar() {
+  local filled=$1 color=$2
+  local w=4
+  [ "$filled" -gt "$w" ] && filled=$w
+  [ "$filled" -lt 0 ] && filled=0
+  local empty=$(( w - filled ))
+  local fillRun=""
+  [ "$filled" -gt 0 ] && fillRun=$(printf '%*s' "$filled" '' | sed 's/ /▓/g')
+  if [ -n "$color" ] && [ -n "$fillRun" ]; then
+    fillRun="${color}${fillRun}${RST}"
+  fi
+  local emptyRun=""
+  [ "$empty" -gt 0 ] && emptyRun=$(printf '%*s' "$empty" '' | sed 's/ /░/g')
+  printf '%s%s' "$fillRun" "$emptyRun"
+}
+
+# 7d bar fill count (7 segments) — fills when pct crosses the halfway
+# mark of each segment, i.e. at odd-fourteenths: 1/14, 3/14, ..., 13/14.
+get_7d_filled() {
+  local p=${1:-0}
+  [ "$p" -lt 0 ] && p=0
+  [ "$p" -gt 100 ] && p=100
+  local f=$(( (14 * p + 100) / 200 ))
+  [ "$f" -gt 7 ] && f=7
+  [ "$f" -lt 0 ] && f=0
+  printf '%s' "$f"
+}
+
+# 7d bar render with optional green "buffer" shading on the
+# (pace_filled - actual_filled) segments immediately following the
+# actual-filled run.
+render_7d_bar() {
+  local a=$1 p=$2
+  local w=7
+  [ "$a" -gt "$w" ] && a=$w
+  [ "$p" -gt "$w" ] && p=$w
+  [ "$a" -lt 0 ] && a=0
+  [ "$p" -lt 0 ] && p=0
+  local fillRun=""
+  [ "$a" -gt 0 ] && fillRun=$(printf '%*s' "$a" '' | sed 's/ /▓/g')
+  local segs="$fillRun"
+  local tailN
+  if [ "$p" -gt "$a" ]; then
+    local bufN=$(( p - a ))
+    local bufRun
+    bufRun=$(printf '%*s' "$bufN" '' | sed 's/ /░/g')
+    segs="${segs}${GRN}${bufRun}${RST}"
+    tailN=$(( w - a - bufN ))
+  else
+    tailN=$(( w - a ))
+  fi
+  if [ "$tailN" -gt 0 ]; then
+    segs="${segs}$(printf '%*s' "$tailN" '' | sed 's/ /░/g')"
+  fi
+  printf '%s' "$segs"
+}
+
+# Pace = how far through the 168h window we should be by now,
+# expressed as integer percent in [0,100]. Float-divide via awk.
+get_pace() {
+  local resetsAt=$1 nowEpoch=$2
+  if [ -z "$resetsAt" ]; then printf 0; return; fi
+  awk -v r="$resetsAt" -v n="$nowEpoch" '
+    BEGIN {
+      h = (r - n) / 3600.0
+      p = 100.0 * (168.0 - h) / 168.0
+      if (p < 0) p = 0
+      if (p > 100) p = 100
+      printf "%d", int(p)
+    }'
+}
+
+# Countdown: at >= 24h, "(NdMh)"; at < 24h, "(Nh)"; at <= 0, "(0h)".
+get_countdown() {
+  local resetsAt=$1 nowEpoch=$2
+  [ -z "$resetsAt" ] && return
+  local secs=$(( resetsAt - nowEpoch ))
+  if [ "$secs" -le 0 ]; then printf '(0h)'; return; fi
+  local hours=$(( secs / 3600 ))
+  if [ "$hours" -ge 24 ]; then
+    local days=$(( hours / 24 ))
+    local rem=$(( hours - days * 24 ))
+    printf '(%dd%dh)' "$days" "$rem"
+  else
+    printf '(%dh)' "$hours"
+  fi
+}
+
 # ============================================================
-# LINE 1: Context + Rate Limits (no color)
+# LINE 1: Model + Context + Rate Limits
 # ============================================================
 
-ctx_bar=$(make_bar "$used_pct" 10 10)
-size_fmt=$(format_tokens "$ctx_size")
+IFS=$'\x1f' read -r ctx_filled ctx_color <<< "$(get_ctx_band "$cur_tokens")"
+ctx_bar=$(render_ctx_bar "$ctx_filled" "$ctx_color")
 
-line1="${ctx_bar} ${used_pct}% / ${size_fmt} | ↑$(format_tokens "$in_tok") ↓$(format_tokens "$out_tok")"
+line1="${ctx_bar} ${used_pct}% ($(format_tokens "$cur_tokens")) / $(format_tokens "$ctx_size")"
 
 if [ -n "$rl_5h_pct" ] && [ -n "$rl_5h_reset" ]; then
   rl5_bar=$(make_bar "$rl_5h_pct" 4 25)
@@ -86,13 +209,34 @@ if [ -n "$rl_5h_pct" ] && [ -n "$rl_5h_reset" ]; then
 fi
 
 if [ -n "$rl_7d_pct" ] && [ -n "$rl_7d_reset" ]; then
-  rl7_bar=$(make_bar "$rl_7d_pct" 4 25)
-  if [ "$(epoch_fmt "${rl_7d_reset}" %F)" = "$(date +%F)" ]; then
+  rl7_pace=$(get_pace "$rl_7d_reset" "$now")
+  rl7_a=$(get_7d_filled "$rl_7d_pct")
+  rl7_p=$(get_7d_filled "$rl7_pace")
+  rl7_bar=$(render_7d_bar "$rl7_a" "$rl7_p")
+  hoursToReset=$(( (rl_7d_reset - now) / 3600 ))
+  if [ "$hoursToReset" -lt 24 ]; then
     rl7_when=$(epoch_fmt "${rl_7d_reset}" %H:%M)
   else
     rl7_when=$(epoch_fmt "${rl_7d_reset}" %a)
   fi
-  line1="${line1} | 7d ${rl7_bar} ${rl_7d_pct}% ${rl7_when}"
+  rl7_cd=$(get_countdown "$rl_7d_reset" "$now")
+  line1="${line1} | 7d ${rl7_bar} ${rl_7d_pct}%/${rl7_pace}% ${rl7_when} ${rl7_cd}"
+fi
+
+if [ -n "$rl_s7d_pct" ] && [ -n "$rl_s7d_reset" ]; then
+  rls7d_pace=$(get_pace "$rl_s7d_reset" "$now")
+  rls7d_a=$(get_7d_filled "$rl_s7d_pct")
+  rls7d_p=$(get_7d_filled "$rls7d_pace")
+  rls7d_bar=$(render_7d_bar "$rls7d_a" "$rls7d_p")
+  line1="${line1} | s7d ${rls7d_bar} ${rl_s7d_pct}%/${rls7d_pace}%"
+fi
+
+# Prepend short model name + optional effort to line 1.
+# display_name like "Opus 4.7 (1M context)" → first word ("Opus"); append ":<effort>" when present.
+if [ -n "$model_name" ]; then
+  model_short="${model_name%% *}"
+  [ -n "$effort_level" ] && model_short="${model_short}:${effort_level}"
+  line1="${model_short} ${line1}"
 fi
 
 # (line1 output deferred — all output buffered to end of script
@@ -134,7 +278,7 @@ fi
 # --- Git status (cached) ---
 git_dir="${cur_dir:-$proj_dir}"
 GIT_CACHE="/tmp/claude-sl-git"
-now=$(date +%s)
+gitNow=$(date +%s)
 git_branch=""
 git_icons=""
 is_git=false
@@ -144,7 +288,7 @@ if [ -n "$git_dir" ] && [ -d "$git_dir" ]; then
 
   if [ -f "$GIT_CACHE" ]; then
     IFS=$'\x1f' read -r cached_dir cached_branch cached_icons cached_time < "$GIT_CACHE"
-    if [ "$cached_dir" = "$git_dir" ] && [ -n "$cached_time" ] && [ $((now - cached_time)) -le 5 ]; then
+    if [ "$cached_dir" = "$git_dir" ] && [ -n "$cached_time" ] && [ $((gitNow - cached_time)) -le 5 ]; then
       git_branch="$cached_branch"
       git_icons="$cached_icons"
       is_git=true
@@ -160,7 +304,7 @@ if [ -n "$git_dir" ] && [ -d "$git_dir" ]; then
     [ -n "$(git -C "$git_dir" diff --numstat 2>/dev/null | head -1)" ] && icons="${icons}!"
     [ -n "$(git -C "$git_dir" ls-files --others --exclude-standard 2>/dev/null | head -1)" ] && icons="${icons}?"
     git_icons="$icons"
-    printf '%s\x1f%s\x1f%s\x1f%s' "$git_dir" "$git_branch" "$git_icons" "$now" > "$GIT_CACHE"
+    printf '%s\x1f%s\x1f%s\x1f%s' "$git_dir" "$git_branch" "$git_icons" "$gitNow" > "$GIT_CACHE"
   fi
 fi
 
