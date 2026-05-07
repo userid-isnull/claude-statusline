@@ -76,7 +76,7 @@ This lets other tools on the machine (cron jobs, dashboards, debugging scripts) 
 
 ## Deterministic test clock
 
-Both scripts honor `STATUSLINE_NOW_EPOCH` (env var) — when set to a Unix timestamp, all "now"-relative computations (pace, countdown, "is reset today?") use that value instead of the system clock. PowerShell additionally accepts `-NowEpoch <long>` as a parameter.
+The script honors `STATUSLINE_NOW_EPOCH` (env var) — when set to a Unix timestamp, all "now"-relative computations (pace, countdown, "is reset today?") use that value instead of the system clock.
 
 ```sh
 # Pin the clock for repeatable rendering
@@ -87,22 +87,19 @@ This is purely for tests/demos; production runs always use the live clock.
 
 ## Requirements
 
-**Linux / macOS (bash script)**
-- bash 4.4+
+- bash 4.4+ (Linux, macOS, WSL, or Git Bash on Windows — Claude Code on Windows already routes statusLine commands through Git Bash)
 - [jq](https://jqlang.github.io/jq/)
-- `awk` (for the float-division in `get_pace`)
-- A [Nerd Font](https://www.nerdfonts.com/) (for the `` branch icon)
+- `awk` (for float division in `get_pace`)
 - GNU or BSD `date` (both supported via the `epoch_fmt` helper)
+- A [Nerd Font](https://www.nerdfonts.com/) (for the `` branch icon)
 
-**Windows (PowerShell script)**
-- PowerShell 5.1+ (ships with Windows 10/11)
-- Git for Windows (for git status features)
-- A Nerd Font in your terminal
-- No `jq` needed — uses built-in `ConvertFrom-Json`
+Installing jq:
+- **Debian/Ubuntu:** `sudo apt install jq`
+- **macOS (Homebrew):** `brew install jq`
+- **Windows (scoop):** `scoop install jq`
+- **Windows (winget):** `winget install jqlang.jq`
 
 ## Installation
-
-### Linux / macOS
 
 ```sh
 cp statusline.sh ~/.claude/statusline.sh
@@ -115,31 +112,13 @@ Add to `~/.claude/settings.json`:
 {
   "statusLine": {
     "type": "command",
-    "command": "~/.claude/statusline.sh",
+    "command": "bash ~/.claude/statusline.sh",
     "padding": 1
   }
 }
 ```
 
-### Windows
-
-```powershell
-Copy-Item statusline.ps1 "$env:USERPROFILE\.claude\statusline.ps1"
-```
-
-Add to `%USERPROFILE%\.claude\settings.json`:
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "powershell -NoProfile -File C:/Users/YOUR_USERNAME/.claude/statusline.ps1",
-    "padding": 1
-  }
-}
-```
-
-Replace `YOUR_USERNAME` with your Windows username.
+The `bash` prefix makes the command portable across Linux, macOS, WSL, and Windows-via-Git-Bash without depending on shebang/exec-bit handling. On Windows, Claude Code locates Git Bash automatically.
 
 ### Verify
 
@@ -153,25 +132,25 @@ echo '{"model":{"display_name":"Opus"},"context_window":{"used_percentage":42,"c
 
 ## Deploying to other machines
 
-The bash script is cross-platform across Linux and macOS. To propagate:
+The same script runs on every host. To propagate:
 
 ```sh
 scp statusline.sh user@host:~/.claude/statusline.sh
 ssh user@host chmod +x ~/.claude/statusline.sh
 ```
 
-Each host reads its own `~/.config/starship.toml` at runtime for SSH colors, so no per-host customization of the script is needed.
+Each host reads its own `~/.config/starship.toml` at runtime for SSH colors, so no per-host customization is needed.
 
 **Current deployments:**
 
-| Host | OS | Script | Config location |
-|------|----|--------|----------------|
-| fss-wsl | WSL2 Ubuntu (local) | `~/.claude/statusline.sh` | `~/.claude/settings.json` |
-| fss | Windows 11 (local) | `%USERPROFILE%\.claude\statusline.ps1` | `%USERPROFILE%\.claude\settings.json` |
-| oam | macOS | `~/.claude/statusline.sh` | `~/.claude/settings.json` |
-| xhp | Debian 13 | `~/.claude/statusline.sh` | `~/.claude/settings.json` |
+| Host | OS | Notes |
+|------|----|-------|
+| fss-wsl | WSL2 Ubuntu (local) | |
+| fss | Windows 11 (local) | runs through Git Bash |
+| oam | macOS | |
+| xhp | Debian 13 | jq installed via `sudo apt install jq` |
 
-`jq` had to be installed on xhp (`sudo apt install jq`) — it was not present by default.
+All hosts use `~/.claude/statusline.sh` with `~/.claude/settings.json` pointing at `bash ~/.claude/statusline.sh`.
 
 ## SSH host colors
 
@@ -183,24 +162,6 @@ When connected via SSH (detected via `$SSH_CONNECTION`), the status line prepend
 4. Converts the hex color to ANSI true color: `ESC[1;7;38;2;R;G;Bm` (bold + inverted + 24-bit foreground)
 
 This matches Starship's `style_user = "color1 bold inverted"`. Each machine has its own palette in its own `starship.toml`, so colors automatically differ per host.
-
-## Differences between bash and PowerShell versions
-
-Both scripts produce identical output. The implementations differ in platform idioms:
-
-| Concern | Bash (`statusline.sh`) | PowerShell (`statusline.ps1`) |
-|---------|----------------------|-------------------------------|
-| JSON parsing | `jq` (external dependency) | `ConvertFrom-Json` (built-in) |
-| Field extraction | Single `jq` call, `\x1f`-delimited, `IFS` read | Direct property access on parsed object |
-| Bar characters | `printf '%*s' \| sed 's/ /▓/g'` | `[string][char]0x2593 * $n` (native string multiplication) |
-| Float division (pace) | `awk` (bash `$(())` is integer-only) | Native `[double]` arithmetic |
-| Epoch → time | `epoch_fmt` helper: tries GNU `date -d @epoch`, falls back to BSD `date -r epoch` | `[DateTimeOffset]::FromUnixTimeSeconds()` |
-| Test-clock override | `STATUSLINE_NOW_EPOCH` env var | `-NowEpoch <long>` param **or** `STATUSLINE_NOW_EPOCH` env var |
-| Home abbreviation | `[[ "$var" == "$HOME"* ]]; "~${var:${#HOME}}"` | Normalize `\` to `/`, then `.StartsWith()` with `OrdinalIgnoreCase` |
-| Git cache | `/tmp/claude-sl-git` (`\x1f`-separated) | `$env:TEMP\claude-sl-git.txt` (tab-separated) |
-| Out-of-band tee | `/tmp/statusline-${session_id}.json` + `/tmp/statusline-latest.json` | not currently teed (PS deployment is for one workstation) |
-| Output encoding | Inherited (UTF-8 on modern Linux/macOS) | Explicit `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8` |
-| Line output | One buffered `printf` at end (avoids pty line-flush splits) | Two `[Console]::Out.Write()` calls with explicit `` `n``, no trailing newline |
 
 ## How it works
 
@@ -243,7 +204,15 @@ The `statusLine` property in `~/.claude/settings.json` configures this:
 
 ### Performance
 
-- **Single jq invocation** (bash): All 17 fields extracted in one call, parsed with `IFS=$'\x1f' read`. This avoids forking `jq` per-field.
-- **Git caching**: Git status is cached in a temp file with a 5-second TTL. On cache hit, zero git commands run.
-- **Early-exit git checks**: `head -1` (bash) / `Select-Object -First 1` (PowerShell) on git output avoids reading full diffs just to check if changes exist.
-- **Buffered output (bash)**: One final `printf` call emits both lines, avoiding pty-flush splits that would otherwise render line 1 alone for a frame.
+- **Single jq invocation:** all 18 fields extracted in one call, parsed with `IFS=$'\x1f' read`. Avoids forking `jq` per-field.
+- **Git caching:** git status is cached in a temp file with a 5-second TTL. On cache hit, zero git commands run.
+- **Early-exit git checks:** `head -1` on git output avoids reading full diffs just to check if changes exist.
+- **Buffered output:** one final `printf` call emits both lines, avoiding pty-flush splits that would otherwise render line 1 alone for a frame.
+
+## Tests
+
+```sh
+bash tests/run.sh
+```
+
+Runs a 51-case bash assertion suite covering every line-1 feature (context bands, current_usage preference, 7-segment 7d bar, pace meter, green pace-buffer overlay, countdown formatting, sonnet `s7d`, model:effort prefix, graceful handling when `rate_limits` is absent). Tests pin the clock via `STATUSLINE_NOW_EPOCH=1747000000` so pace and countdown are deterministic across hosts.
