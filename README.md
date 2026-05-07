@@ -101,12 +101,23 @@ Installing jq:
 
 ## Installation
 
+Clone into `~/repos/` (the conventional home for upstream clones — keeps your dev checkout decoupled from the deployed copy that Claude Code actually reads), then run the installer:
+
 ```sh
-cp statusline.sh ~/.claude/statusline.sh
+git clone https://github.com/userid-isnull/claude-statusline.git ~/repos/claude-statusline
+bash ~/repos/claude-statusline/install.sh
+```
+
+`install.sh` copies `statusline.sh` into `~/.claude/`, adds the `statusLine` block to `~/.claude/settings.local.json`, and registers the matching `permissions.allow` entry — all idempotent, safe to re-run after `git pull`. After install, the only path that runs at session-start is `~/.claude/statusline.sh`; your clone in `~/repos/` is just for development.
+
+If you'd rather wire it up by hand:
+
+```sh
+cp ~/repos/claude-statusline/statusline.sh ~/.claude/statusline.sh
 chmod +x ~/.claude/statusline.sh
 ```
 
-Add to `~/.claude/settings.json`:
+Then add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -120,6 +131,14 @@ Add to `~/.claude/settings.json`:
 
 The `bash` prefix makes the command portable across Linux, macOS, WSL, and Windows-via-Git-Bash without depending on shebang/exec-bit handling. On Windows, Claude Code locates Git Bash automatically.
 
+### Updating
+
+```sh
+git -C ~/repos/claude-statusline pull && bash ~/repos/claude-statusline/install.sh
+```
+
+`install.sh` is idempotent, so the second run just refreshes `~/.claude/statusline.sh` from the new upstream and leaves the settings entries untouched.
+
 ### Verify
 
 Start a new Claude Code session. The status line appears after the first assistant message.
@@ -132,7 +151,16 @@ echo '{"model":{"display_name":"Opus"},"context_window":{"used_percentage":42,"c
 
 ## Deploying to other machines
 
-The same script runs on every host. To propagate:
+The same script runs on every host. The cleanest pattern is to clone+install on each:
+
+```sh
+ssh user@host '
+  git clone https://github.com/userid-isnull/claude-statusline.git ~/repos/claude-statusline
+  bash ~/repos/claude-statusline/install.sh
+'
+```
+
+Or, if you just want to push the deployed script directly without cloning:
 
 ```sh
 scp statusline.sh user@host:~/.claude/statusline.sh
