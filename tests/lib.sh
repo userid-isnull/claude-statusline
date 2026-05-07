@@ -17,6 +17,17 @@ PASS=0
 FAIL=0
 CURRENT_TEST=""
 
+# Each invocation of statusline.sh writes /tmp/statusline-${session_id}.json,
+# /tmp/statusline-latest.json, and /tmp/claude-sl-git. Sweep them at exit so
+# the suite leaves no debris.
+_test_cleanup() {
+  rm -f /tmp/statusline-test-session.json \
+        /tmp/statusline-abc-123-test.json \
+        /tmp/statusline-latest.json \
+        /tmp/claude-sl-git
+}
+trap _test_cleanup EXIT
+
 start_test() {
   CURRENT_TEST="$1"
 }
