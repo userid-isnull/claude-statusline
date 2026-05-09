@@ -299,4 +299,48 @@ out=$(invoke_statusline "$(default_payload \
 stripped=$(line_n 0 "$out" | strip_ansi)
 assert_match ' s7d [▓░]+ 42%/0%' "$stripped"
 
+# ============================================================
+# Describe: SSH host prefix on Line 2 (issue #8)
+# ============================================================
+# STATUSLINE_SSH_PROBE_PROC=0 disables the /proc parent walk so the
+# negative case is deterministic when tests run inside an SSH session.
+
+invoke_statusline_with_env() {
+  local payload="$1"; shift
+  printf '%s' "$payload" | env \
+    -u SSH_CONNECTION -u SSH_CLIENT -u SSH_TTY \
+    STATUSLINE_NOW_EPOCH="$NOW" \
+    STATUSLINE_SSH_PROBE_PROC=0 \
+    "$@" \
+    bash "$STATUSLINE"
+}
+
+ssh_user=$(whoami)
+ssh_host=$(hostname -s)
+
+start_test "no host prefix when no SSH env (proc probe disabled)"
+out=$(invoke_statusline_with_env "$(default_payload)")
+stripped=$(printf '%s' "$out" | strip_ansi)
+assert_no_match "${ssh_user}@${ssh_host}" "$stripped"
+
+start_test "host prefix appears when SSH_CONNECTION set"
+out=$(invoke_statusline_with_env "$(default_payload)" \
+  SSH_CONNECTION="10.0.0.1 22 10.0.0.2 22")
+line2=$(line_n 1 "$out")
+stripped=$(printf '%s' "$line2" | strip_ansi)
+assert_match "${ssh_user}@${ssh_host}" "$stripped"
+
+start_test "host prefix appears when only SSH_TTY set (zellij/tmux passthrough)"
+out=$(invoke_statusline_with_env "$(default_payload)" SSH_TTY=/dev/pts/0)
+line2=$(line_n 1 "$out")
+stripped=$(printf '%s' "$line2" | strip_ansi)
+assert_match "${ssh_user}@${ssh_host}" "$stripped"
+
+start_test "host prefix appears when only SSH_CLIENT set"
+out=$(invoke_statusline_with_env "$(default_payload)" \
+  SSH_CLIENT="10.0.0.1 22 22")
+line2=$(line_n 1 "$out")
+stripped=$(printf '%s' "$line2" | strip_ansi)
+assert_match "${ssh_user}@${ssh_host}" "$stripped"
+
 test_summary
