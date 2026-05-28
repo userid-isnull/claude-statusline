@@ -247,10 +247,49 @@ fi
 # ============================================================
 
 # --- SSH host detection + starship palette color ---
+# Direct env vars cover the ordinary case. The /proc parent walk is the
+# fallback for terminal multiplexers (zellij, tmux, screen) whose
+# long-running server inherits SSH_* once at launch and then spawns
+# panes whose own env never carried those vars. Walking up to the
+# server process recovers the original SSH context.
+is_ssh_session() {
+  if [ -n "${SSH_CONNECTION:-}" ] || [ -n "${SSH_CLIENT:-}" ] || [ -n "${SSH_TTY:-}" ]; then
+    return 0
+  fi
+  [ "${STATUSLINE_SSH_PROBE_PROC:-1}" = 1 ] || return 1
+
+  local pid=$$ depth=0 ppid env_blob
+  local has_proc=0
+  [ -r /proc/self/environ ] && has_proc=1
+
+  while [ -n "$pid" ] && [ "$pid" != "1" ] && [ "$pid" != "0" ] && [ "$depth" -lt 20 ]; do
+    if [ "$has_proc" = 1 ] && [ -r "/proc/$pid/environ" ]; then
+      env_blob=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null)
+    else
+      # macOS / BSD: `ps eww` prints env tokens after the command. Tokens are
+      # space-separated KEY=VALUE pairs; splitting on whitespace + grep is
+      # good enough to detect presence of SSH_*. Restricted to same-UID procs.
+      env_blob=$(ps eww -p "$pid" 2>/dev/null | tail -n +2 | tr ' \t' '\n\n')
+    fi
+    if printf '%s\n' "$env_blob" | grep -qE '^SSH_(CONNECTION|CLIENT|TTY)='; then
+      return 0
+    fi
+    if [ "$has_proc" = 1 ] && [ -r "/proc/$pid/status" ]; then
+      ppid=$(awk '/^PPid:/ {print $2; exit}' "/proc/$pid/status" 2>/dev/null)
+    else
+      ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    fi
+    { [ -z "$ppid" ] || [ "$ppid" = "$pid" ]; } && return 1
+    pid=$ppid
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
 host_prefix=""
 host_prefix_len=0
 
-if [ -n "$SSH_CONNECTION" ]; then
+if is_ssh_session; then
   ssh_user=$(whoami)
   ssh_host=$(hostname -s)
   host_text=" ${ssh_user}@${ssh_host} "
