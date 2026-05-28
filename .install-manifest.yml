@@ -1,0 +1,21 @@
+# Read by oam-ansible's scripts/capture/external-tools.sh to record
+# this tool's install targets in per-host state/<host>/external-tools.yml.
+#
+# Lists where install.sh deposits artifacts on the host. No path here
+# should ever point under ~/repos/ — this repo is dev/test/install only,
+# never a runtime location (per the homelab-wide ~/repos clone-vs-runtime
+# standard documented in ~/.claude/CLAUDE.md).
+#
+# Schema:
+#   install_targets[]:
+#     path:  ~-relative path the artifact lives at after install.sh runs
+#     kind:  file | dir | symlink | settings-patch
+#            (settings-patch = install.sh edits this file in-place rather
+#             than overwriting it; capture script just records "is the
+#             file present", not whether the patch is current)
+
+install_targets:
+  - path: ~/.claude/statusline.sh
+    kind: file
+  - path: ~/.claude/settings.local.json
+    kind: settings-patch
