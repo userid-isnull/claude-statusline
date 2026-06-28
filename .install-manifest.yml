@@ -1,0 +1,12 @@
+name: claude-statusline
+repo_url: https://github.com/userid-isnull/claude-statusline
+description: Custom Claude Code status line showing session metrics and workspace info.
+platforms:
+  - macos
+  - linux
+installer: install.sh
+install_targets:
+  - path: "~/.claude/statusline.sh"
+    kind: file
+  - path: "~/.claude/settings.local.json"
+    kind: settings-patch
