@@ -1,0 +1,27 @@
+name: Label merge conflicts
+
+# Toggles the "has conflicts" label on open PRs that can no longer merge cleanly.
+# Runs on base-branch pushes and on PR open/update. The label must already exist in
+# the repo; the action only applies or removes it.
+on:
+  push:
+    branches: [main]
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Label PRs with merge conflicts
+        uses: eps1lon/actions-label-merge-conflict@v3
+        with:
+          dirtyLabel: "has conflicts"
+          repoToken: "${{ secrets.GITHUB_TOKEN }}"
+          retryAfter: 30
+          retryMax: 5
