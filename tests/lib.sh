@@ -91,7 +91,9 @@ build_payload() {
 # STATUSLINE_NOW_EPOCH overrides the system clock so pace tests are deterministic.
 invoke_statusline() {
   local payload="$1"
-  printf '%s' "$payload" | STATUSLINE_NOW_EPOCH="$NOW" bash "$STATUSLINE"
+  # Hermetic by default: the omp usage source is off unless a test opts in
+  # via STATUSLINE_OMP_CACHE fixtures (see test_omp_usage.sh).
+  printf '%s' "$payload" | STATUSLINE_NOW_EPOCH="$NOW" STATUSLINE_OMP_DISABLE=1 bash "$STATUSLINE"
 }
 
 # Convenience: extract the Nth output line (0-based) from a captured stdout.

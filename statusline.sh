@@ -62,6 +62,63 @@ if [ "$cur_tokens" -le 0 ]; then
   cur_tokens=$(( used_pct * ctx_size / 100 ))
 fi
 
+# --- omp usage source (optional) ---
+# `omp usage --json` exposes provider rate limits Claude Code's statusline
+# payload lacks (Fable-tier weekly, OpenAI Codex windows, 5h/7d when Claude
+# Code withholds them). Cached for STATUSLINE_OMP_TTL seconds (default 60 —
+# /usage is IP-rate-limited upstream and omp startup costs ~1s). A failed
+# refresh keeps the previous cache; no omp or no cache means the Claude Code
+# fields above are used unchanged.
+OMP_TTL=${STATUSLINE_OMP_TTL:-60}
+OMP_CACHE=${STATUSLINE_OMP_CACHE:-"${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline/omp-usage.json"}
+if [ "${STATUSLINE_OMP_DISABLE:-0}" = 0 ] && command -v omp >/dev/null 2>&1; then
+  cache_age=$(( OMP_TTL + 1 ))
+  if [ -r "$OMP_CACHE" ]; then
+    cache_mtime=$(stat -c %Y "$OMP_CACHE" 2>/dev/null || stat -f %m "$OMP_CACHE" 2>/dev/null || echo 0)
+    cache_age=$(( now - cache_mtime ))
+  fi
+  if [ "$cache_age" -ge "$OMP_TTL" ]; then
+    omp_fresh=$(timeout "${STATUSLINE_OMP_TIMEOUT:-10}" omp usage --json 2>/dev/null) || omp_fresh=""
+    case "$omp_fresh" in
+      *'"reports"'*)
+        mkdir -p "$(dirname "$OMP_CACHE")" 2>/dev/null
+        printf '%s' "$omp_fresh" >"${OMP_CACHE}.tmp" 2>/dev/null \
+          && mv -f "${OMP_CACHE}.tmp" "$OMP_CACHE" 2>/dev/null
+        ;;
+    esac
+  fi
+  if [ -r "$OMP_CACHE" ]; then
+    IFS=$'\x1f' read -r \
+      o5h_pct o5h_reset o7d_pct o7d_reset ofb_pct ofb_rst osn_pct osn_rst \
+      ocodex_recs \
+      <<< "$(jq -r '
+        def L($id): first(.reports[]? | select(.provider == "anthropic")
+                          | .limits[]? | select(.id == $id)) // null;
+        def P($l): if $l == null then "" else ($l.amount.used // "" | tostring) end;
+        # omp resetsAt is epoch milliseconds; the status line works in seconds.
+        def R($l): if ($l.window.resetsAt // null) == null then ""
+                   else (($l.window.resetsAt / 1000) | floor | tostring) end;
+        [
+          (L("anthropic:5h") | P(.)), (L("anthropic:5h") | R(.)),
+          (L("anthropic:7d") | P(.)), (L("anthropic:7d") | R(.)),
+          (L("anthropic:7d:fable") | P(.)), (L("anthropic:7d:fable") | R(.)),
+          (L("anthropic:7d:sonnet") | P(.)), (L("anthropic:7d:sonnet") | R(.)),
+          ([ .reports[]? | select(.provider == "openai-codex") | .limits[]?
+             | [ (.amount.used // "" | tostring),
+                 ((.window.resetsAt // null)
+                  | if . == null then "" else ((. / 1000) | floor | tostring) end),
+                 ((.window.durationMs // 0) | floor | tostring) ]
+               | join("\u001f") ] | join("\u001e"))
+        ] | join("\u001f")' "$OMP_CACHE" 2>/dev/null)"
+
+    # Fill gaps only: a value Claude Code already supplied stays authoritative,
+    # so mid-session data never regresses to an older omp snapshot.
+    [ -z "$rl_5h_pct" ]   && [ -n "$o5h_pct" ]   && { rl_5h_pct=$o5h_pct;     rl_5h_reset=$o5h_reset; }
+    [ -z "$rl_7d_pct" ]   && [ -n "$o7d_pct" ]   && { rl_7d_pct=$o7d_pct;     rl_7d_reset=$o7d_reset; }
+    [ -z "$rl_s7d_pct" ]  && [ -n "$osn_pct" ]   && { rl_s7d_pct=$osn_pct;    rl_s7d_reset=$osn_rst; }
+  fi
+fi
+
 # --- Helpers ---
 
 format_tokens() {
@@ -105,6 +162,7 @@ get_ctx_band() {
   fi
 }
 
+# Render the context bar from a pre-computed fill count + optional color.
 render_ctx_bar() {
   local filled=$1 color=$2
   local w=4
@@ -119,6 +177,21 @@ render_ctx_bar() {
   local emptyRun=""
   [ "$empty" -gt 0 ] && emptyRun=$(printf '%*s' "$empty" '' | sed 's/ /░/g')
   printf '%s%s' "$fillRun" "$emptyRun"
+}
+
+# Pace = how far through the usage window we should be by now, expressed as
+# integer percent in [0,100]. Float-divide via awk. windowSecs defaults to the
+# 168h weekly window; omp-backed segments pass their own durationMs.
+get_pace() {
+  local resetsAt=$1 nowEpoch=$2 windowSecs=${3:-604800}
+  if [ -z "$resetsAt" ]; then printf 0; return; fi
+  awk -v r="$resetsAt" -v n="$nowEpoch" -v w="$windowSecs" '
+    BEGIN {
+      p = 100.0 * (n - (r - w)) / w
+      if (p < 0) p = 0
+      if (p > 100) p = 100
+      printf "%d", int(p)
+    }'
 }
 
 # 7d bar fill count (7 segments) — fills when pct crosses the halfway
@@ -162,21 +235,6 @@ render_7d_bar() {
   printf '%s' "$segs"
 }
 
-# Pace = how far through the 168h window we should be by now,
-# expressed as integer percent in [0,100]. Float-divide via awk.
-get_pace() {
-  local resetsAt=$1 nowEpoch=$2
-  if [ -z "$resetsAt" ]; then printf 0; return; fi
-  awk -v r="$resetsAt" -v n="$nowEpoch" '
-    BEGIN {
-      h = (r - n) / 3600.0
-      p = 100.0 * (168.0 - h) / 168.0
-      if (p < 0) p = 0
-      if (p > 100) p = 100
-      printf "%d", int(p)
-    }'
-}
-
 # Countdown: at >= 24h, "(NdMh)"; at < 24h, "(Nh)"; at <= 0, "(0h)".
 get_countdown() {
   local resetsAt=$1 nowEpoch=$2
@@ -202,10 +260,11 @@ ctx_bar=$(render_ctx_bar "$ctx_filled" "$ctx_color")
 
 line1="${ctx_bar} ${used_pct}% ($(format_tokens "$cur_tokens")) / $(format_tokens "$ctx_size")"
 
-if [ -n "$rl_5h_pct" ] && [ -n "$rl_5h_reset" ]; then
+if [ -n "$rl_5h_pct" ]; then
   rl5_bar=$(make_bar "$rl_5h_pct" 4 25)
-  rl5_time=$(epoch_fmt "${rl_5h_reset}" %H:%M)
-  line1="${line1} | 5h ${rl5_bar} ${rl_5h_pct}% ${rl5_time}"
+  rl5_time=""
+  [ -n "$rl_5h_reset" ] && rl5_time=$(epoch_fmt "${rl_5h_reset}" %H:%M)
+  line1="${line1} | 5h ${rl5_bar} ${rl_5h_pct}%${rl5_time:+ ${rl5_time}}"
 fi
 
 if [ -n "$rl_7d_pct" ] && [ -n "$rl_7d_reset" ]; then
@@ -229,6 +288,36 @@ if [ -n "$rl_s7d_pct" ] && [ -n "$rl_s7d_reset" ]; then
   rls7d_p=$(get_7d_filled "$rls7d_pace")
   rls7d_bar=$(render_7d_bar "$rls7d_a" "$rls7d_p")
   line1="${line1} | s7d ${rls7d_bar} ${rl_s7d_pct}%/${rls7d_pace}%"
+fi
+
+# omp-only segments (no Claude Code payload equivalent). Same bar + pace
+# render as s7d; Fable is a weekly window like 7d, Codex windows are labeled
+# by their own durationMs (c5h / c7d).
+if [ -n "$ofb_pct" ] && [ -n "$ofb_rst" ]; then
+  ofb_pace=$(get_pace "$ofb_rst" "$now")
+  ofb_a=$(get_7d_filled "$ofb_pct")
+  ofb_p=$(get_7d_filled "$ofb_pace")
+  ofb_bar=$(render_7d_bar "$ofb_a" "$ofb_p")
+  line1="${line1} | f7d ${ofb_bar} ${ofb_pct}%/${ofb_pace}%"
+fi
+
+if [ -n "${ocodex_recs:-}" ]; then
+  IFS=$'\x1e' read -ra codex_arr <<< "$ocodex_recs"
+  for codex_rec in "${codex_arr[@]}"; do
+    IFS=$'\x1f' read -r cx_pct cx_reset cx_durms <<< "$codex_rec"
+    [ -n "$cx_pct" ] || continue
+    case "$cx_durms" in
+      18000000)  cx_label="c5h" ;;
+      604800000) cx_label="c7d" ;;
+      *)         cx_label="cx" ;;
+    esac
+    cx_winsecs=$(( cx_durms / 1000 ))
+    cx_pace=$(get_pace "$cx_reset" "$now" "$cx_winsecs")
+    cx_a=$(get_7d_filled "$cx_pct")
+    cx_p=$(get_7d_filled "$cx_pace")
+    cx_bar=$(render_7d_bar "$cx_a" "$cx_p")
+    line1="${line1} | ${cx_label} ${cx_bar} ${cx_pct}%/${cx_pace}%"
+  done
 fi
 
 # Prepend short model name + optional effort to line 1.

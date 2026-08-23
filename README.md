@@ -39,6 +39,17 @@ my-project  main [+!?] | 776fca86-0d70-46cf-a18a-182e73101fc6
 
 The rate limit sections (`5h …`, `7d …`, `s7d …`) only appear when the corresponding JSON fields are populated. Each section is separated by ` | `.
 
+### omp-backed segments (`f7d`, `c5h`, `c7d`)
+
+When the [`omp`](https://github.com/can1357/oh-my-pi) binary is on PATH, the status line also reads a cached snapshot of `omp usage --json` (default cache: `${XDG_CACHE_HOME:-~/.cache}/claude-statusline/omp-usage.json`, refreshed at most every 60 s, `STATUSLINE_OMP_TTL` to tune). This unlocks windows Claude Code's payload does not carry:
+
+| Segment | Example | Source | Notes |
+|---------|---------|--------|-------|
+| Fable 7d bar + actual/pace | `f7d ▓▓▓▓░░░ 58%/75%` | omp limit id `anthropic:7d:fable` | Same render as `s7d` (no day/countdown). |
+| Codex window bar + actual/pace | `c5h ░░░░ 4%/55%`, `c7d ▓▓▓▓▓▓▓ 100%/86%` | omp provider `openai-codex`, labeled by each window's own `durationMs` (18e6 ms → `c5h`, 604.8e6 ms → `c7d`) | One segment per reported window; unknown durations label as `cx`. |
+
+omp data is also used to **gap-fill** `5h`/`7d`/`s7d` when Claude Code's payload omits them; values already present in the statusline JSON always win, so mid-session numbers never regress to an older omp snapshot. Set `STATUSLINE_OMP_DISABLE=1` to turn the whole source off; everything then behaves exactly as before.
+
 > **Sonnet field availability:** As of Claude Code 2.1.128 there is no documented Sonnet-only 7d field in the statusline JSON — only `rate_limits.five_hour` and `rate_limits.seven_day`. The `s7d` segment is wired up to two probable paths (`rate_limits.seven_day_sonnet` and `rate_limits.seven_day.sonnet`) so it lights up automatically the moment Anthropic exposes one. Until then it stays silent.
 
 ## Line 2 breakdown
