@@ -4,7 +4,7 @@ A custom status line for [Claude Code](https://docs.anthropic.com/en/docs/claude
 
 ## Layout
 
-The status line renders exactly two lines.
+The status line renders two lines, plus a third line whenever the session is working inside a git worktree.
 
 **Line 1 — Model, context window, and rate limits:**
 
@@ -16,6 +16,12 @@ Opus:high ▓▓░░ 13% (135K) / 1.0M | 5h ░░░░ 4% 02:50 | 7d ▓▓�
 
 ```
 my-project  main [+!?] | 776fca86-0d70-46cf-a18a-182e73101fc6
+```
+
+**Line 3 — Active git worktree (only inside a linked worktree):**
+
+```
+ ../.worktrees/my-project/my-branch
 ```
 
 ## Line 1 breakdown
@@ -63,18 +69,36 @@ Line 2 mimics a [Starship](https://starship.rs/) prompt. The format varies by sc
 | Local, git + different cwd | `my-project  main [!?] > ./subdir \| 776fca86-...` |
 | Local, no git + different cwd | `my-project > ./subdir \| 776fca86-...` |
 | SSH, git | `id@oam my-project  main [!?] \| 776fca86-...` |
-| Worktree | `my-project  wt-name [!?] \| 776fca86-...` |
+| Worktree (line 3 appears) | `~/repos/my-project [!?] \| 776fca86-...`<br>` ../.worktrees/my-project/my-branch` |
 
 | Segment | Source field | Logic |
 |---------|-------------|-------|
 | SSH host prefix | `$SSH_CONNECTION` env var | Only shown in SSH sessions. Styled with bold + inverted + true color from the active Starship palette's `color1`. |
-| Project path | `workspace.project_dir` | Git repos: basename only. Non-git: full path with `~` home abbreviation. |
-| Branch / worktree | `git branch --show-current` / `worktree.name` | `` (U+E0A0 Powerline icon) + name. Worktree name replaces branch when present. |
+| Project path | `workspace.project_dir` | Git main tree: basename only. Non-git: full path with `~` home abbreviation. In a worktree: full `~`-abbreviated path of the dir the session was registered to — or of the repo's main checkout when the session was launched inside the worktree itself. |
+| Branch | `git branch --show-current` | `` (U+E0A0 Powerline icon) + name. Omitted in worktree sessions, where line 3 identifies the checkout instead. |
 | Git status | `git diff`, `git ls-files` | Presence-only icons in brackets: `+` staged, `!` modified, `?` untracked. No counts. |
-| Working directory | `workspace.current_dir` | Shown as `> ./relative` only when different from project dir. |
+| Working directory | `workspace.current_dir` | Shown as `> ./relative` only when different from project dir. Suppressed in worktree sessions, where cwd is inside the worktree by definition and line 3 already locates it. |
 | Session ID | `session_id` | UUID at end, separated by ` \| `. |
 
-**Width limit:** 90 characters. If line 2 exceeds this, the session ID wraps to a new line.
+**Width limit:** 90 characters. If line 2 exceeds this, the session ID wraps to a new line. Claude Code itself never wraps — it truncates an overlong row with `…` — which is why the worktree path gets its own row rather than being appended here.
+
+## Line 3 breakdown — active git worktree
+
+Line 3 appears **only** when the current directory sits inside a linked worktree (one created by `git worktree add`). Main working trees render two lines exactly as before.
+
+```
+ ../.worktrees/my-project/my-branch
+```
+
+| Segment | Source | Logic |
+|---------|--------|-------|
+| Worktree icon | — | `` (U+F07B), distinct from the branch icon so the row is unambiguous. |
+| Worktree path | `git rev-parse --show-toplevel` | Rendered relative to the repo's **main checkout** (`git rev-parse --git-common-dir`'s parent), so the same worktree reads identically whether the session was launched in the main tree or inside the worktree. `.`-prefixed when the worktree is nested inside the main tree (`./.claude/worktrees/agent-x`), `../` chains when it lives outside it. |
+| `~` shortening | `$HOME` | A worktree under `$HOME` is shown as `~/...` when that renders shorter than the `../` chain. A worktree outside `$HOME` — including one under another user's home — always keeps the explicit relative path, because `~/...` there would name the wrong directory. |
+
+Detection uses the filesystem, not the payload: a linked worktree has a `.git` **file**, a main tree has a `.git` **directory**, and a submodule checkout — which also carries a `.git` file — is excluded via `git rev-parse --show-superproject-working-tree`. The `worktree.*` payload fields are deliberately unused — they populate only for `--worktree` sessions, and `workspace.git_worktree` carries just a basename, not the path.
+
+Worktree layouts seen on this fleet, all rendered by the same logic: central pool (`../.worktrees/repo/branch`), flat pool (`../.worktrees/branch`), sibling suffix dirs (`../repo-covers`), pools nested in the main tree (`./.worktrees/branch`, `./.claude/worktrees/agent-x`), and out-of-tree scratchpads (`../../../tmp/...`).
 
 ## Out-of-band JSON capture
 
@@ -204,7 +228,7 @@ This matches Starship's `style_user = "color1 bold inverted"`. Each machine has 
 
 ## How it works
 
-Claude Code's [status line feature](https://docs.anthropic.com/en/docs/claude-code/statusline) runs a configured command after each assistant message (debounced at 300ms). The command receives a JSON payload on stdin and prints two lines to stdout.
+Claude Code's [status line feature](https://docs.anthropic.com/en/docs/claude-code/statusline) runs a configured command after each assistant message (debounced at 300ms). The command receives a JSON payload on stdin and prints two or three lines to stdout.
 
 The `statusLine` property in `~/.claude/settings.json` configures this:
 
@@ -233,7 +257,7 @@ The `statusLine` property in `~/.claude/settings.json` configures this:
 | `workspace.project_dir` | string | Project path display |
 | `workspace.current_dir` | string | Working directory (if different) |
 | `session_id` | string | Session UUID + per-session JSON tee filename |
-| `worktree.name` | string (absent if not worktree) | Replaces branch name |
+| `workspace.git_worktree`, `worktree.*` | string / object | **Unused.** `worktree.*` populates only for `--worktree` sessions (verified `null` in real worktree payloads on this fleet), and `workspace.git_worktree` is a basename with no path. The worktree line is derived from git instead. |
 | `rate_limits.five_hour.used_percentage` | number (absent if not Max) | 5h bar + percentage |
 | `rate_limits.five_hour.resets_at` | number (absent if not Max) | 5h reset time |
 | `rate_limits.seven_day.used_percentage` | number (absent if not Max) | 7d bar + percentage |
@@ -243,10 +267,10 @@ The `statusLine` property in `~/.claude/settings.json` configures this:
 
 ### Performance
 
-- **Single jq invocation:** all 18 fields extracted in one call, parsed with `IFS=$'\x1f' read`. Avoids forking `jq` per-field.
+- **Single jq invocation:** all 17 fields extracted in one call, parsed with `IFS=$'\x1f' read`. Avoids forking `jq` per-field.
 - **Git caching:** git status is cached in a temp file with a 5-second TTL. On cache hit, zero git commands run.
 - **Early-exit git checks:** `head -1` on git output avoids reading full diffs just to check if changes exist.
-- **Buffered output:** one final `printf` call emits both lines, avoiding pty-flush splits that would otherwise render line 1 alone for a frame.
+- **Buffered output:** one final `printf` call emits all output rows, avoiding pty-flush splits that would otherwise render line 1 alone for a frame.
 
 ## Tests
 
@@ -254,4 +278,4 @@ The `statusLine` property in `~/.claude/settings.json` configures this:
 bash tests/run.sh
 ```
 
-Runs a 51-case bash assertion suite covering every line-1 feature (context bands, current_usage preference, 7-segment 7d bar, pace meter, green pace-buffer overlay, countdown formatting, sonnet `s7d`, model:effort prefix, graceful handling when `rate_limits` is absent). Tests pin the clock via `STATUSLINE_NOW_EPOCH=1747000000` so pace and countdown are deterministic across hosts.
+Runs 88 bash assertions: 8 in `test_omp_usage.sh` for omp-derived rate-limit gap-fill and Codex/Fable segments; 55 in `test_statusline.sh` for context bands, rate-limit bars, pace/countdown, model/effort, SSH, and absent-field handling; and 25 in `test_worktree.sh`, which builds real repos with `git worktree add` layouts (central pool, flat pool, sibling suffix dirs, in-tree pools, out-of-home scratchpads, detached HEAD, sessions launched inside the worktree, `$HOME` component boundaries, and the submodule guard) and asserts the rendered rows. Tests pin the clock via `STATUSLINE_NOW_EPOCH=1747000000` so pace and countdown are deterministic across hosts.
