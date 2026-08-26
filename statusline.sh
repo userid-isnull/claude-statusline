@@ -16,6 +16,7 @@ exec < <(printf '%s' "$__rl_payload")
 
 RST=$'\033[0m'
 BRANCH=$''
+WTREE=$'\uf07b'
 GRN=$'\033[32m'
 YEL=$'\033[33m'
 RED=$'\033[31m'
@@ -27,7 +28,7 @@ now=${STATUSLINE_NOW_EPOCH:-$(date +%s)}
 # --- Extract all fields from JSON stdin in one jq call ---
 IFS=$'\x1f' read -r model_name effort_level used_pct ctx_size \
   cu_in cu_out cu_cc cu_cr \
-  proj_dir cur_dir session_id wt_name \
+  proj_dir cur_dir session_id \
   rl_5h_pct rl_5h_reset rl_7d_pct rl_7d_reset \
   rl_s7d_pct rl_s7d_reset \
   <<< "$(jq -r '[
@@ -42,7 +43,6 @@ IFS=$'\x1f' read -r model_name effort_level used_pct ctx_size \
     (.workspace.project_dir // ""),
     (.workspace.current_dir // .cwd // ""),
     (.session_id // ""),
-    (.worktree.name // ""),
     (.rate_limits.five_hour.used_percentage // "" | if type == "number" then floor | tostring else . end),
     (.rate_limits.five_hour.resets_at // ""),
     (.rate_limits.seven_day.used_percentage // "" | if type == "number" then floor | tostring else . end),
@@ -251,6 +251,39 @@ get_countdown() {
   fi
 }
 
+# Display path of $2 as seen from $1, both absolute.
+# Same dir -> "."; descendant -> "./sub/dir"; otherwise the common-prefix
+# walk emits one ".." per level left behind. Comparison is per path
+# component, so /repos/foo never matches /repos/foo-bar.
+relpath() {
+  local from=${1%/} to=${2%/}
+  [ "$to" = "$from" ] && { printf '.'; return; }
+  case "$to" in
+    "$from"/*) printf './%s' "${to#"$from"/}"; return ;;
+  esac
+
+  local -a fa ta
+  IFS='/' read -ra fa <<< "$from"
+  IFS='/' read -ra ta <<< "$to"
+
+  local i=0
+  while [ "$i" -lt "${#fa[@]}" ] && [ "$i" -lt "${#ta[@]}" ] \
+    && [ "${fa[$i]}" = "${ta[$i]}" ]; do
+    i=$((i + 1))
+  done
+
+  local ups="" j
+  for ((j = i; j < ${#fa[@]}; j++)); do ups="../$ups"; done
+
+  local rest
+  rest=$(IFS=/; printf '%s' "${ta[*]:$i}")
+  if [ -z "$rest" ]; then
+    printf '%s' "${ups%/}"
+  else
+    printf '%s%s' "$ups" "$rest"
+  fi
+}
+
 # ============================================================
 # LINE 1: Model + Context + Rate Limits
 # ============================================================
@@ -410,16 +443,25 @@ gitNow=$(date +%s)
 git_branch=""
 git_icons=""
 is_git=false
+is_wt=false
+wt_top=""
+main_top=""
 
 if [ -n "$git_dir" ] && [ -d "$git_dir" ]; then
   need_refresh=true
 
   if [ -f "$GIT_CACHE" ]; then
-    IFS=$'\x1f' read -r cached_dir cached_branch cached_icons cached_time < "$GIT_CACHE"
+    IFS=$'\x1f' read -r cached_dir cached_branch cached_icons cached_time \
+      cached_wt cached_wt_top cached_main_top < "$GIT_CACHE"
     if [ "$cached_dir" = "$git_dir" ] && [ -n "$cached_time" ] && [ $((gitNow - cached_time)) -le 5 ]; then
       git_branch="$cached_branch"
       git_icons="$cached_icons"
       is_git=true
+      if [ "$cached_wt" = "true" ]; then
+        is_wt=true
+        wt_top="$cached_wt_top"
+        main_top="$cached_main_top"
+      fi
       need_refresh=false
     fi
   fi
@@ -432,7 +474,31 @@ if [ -n "$git_dir" ] && [ -d "$git_dir" ]; then
     [ -n "$(git -C "$git_dir" diff --numstat 2>/dev/null | head -1)" ] && icons="${icons}!"
     [ -n "$(git -C "$git_dir" ls-files --others --exclude-standard 2>/dev/null | head -1)" ] && icons="${icons}?"
     git_icons="$icons"
-    printf '%s\x1f%s\x1f%s\x1f%s' "$git_dir" "$git_branch" "$git_icons" "$gitNow" > "$GIT_CACHE"
+
+    # Linked worktrees carry a .git *file* pointing into the parent repo;
+    # the main working tree has a .git directory. Submodules also carry a
+    # .git file, so exclude them via show-superproject-working-tree — being
+    # inside a submodule is not being inside a worktree. The common dir lives
+    # in the main tree, so its parent is the repo's main checkout — the
+    # anchor the worktree path is expressed against.
+    wt_top=$(git -C "$git_dir" rev-parse --show-toplevel 2>/dev/null)
+    super=$(git -C "$git_dir" rev-parse --show-superproject-working-tree 2>/dev/null)
+    if [ -n "$wt_top" ] && [ -f "$wt_top/.git" ] && [ -z "$super" ]; then
+      is_wt=true
+      common=$(git -C "$git_dir" rev-parse --git-common-dir 2>/dev/null)
+      case "$common" in
+        "") ;;
+        /*) ;;
+        *) common="$git_dir/$common" ;;
+      esac
+      [ -n "$common" ] && main_top=$(cd "$common/.." 2>/dev/null && pwd)
+    else
+      wt_top=""
+    fi
+
+    printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' \
+      "$git_dir" "$git_branch" "$git_icons" "$gitNow" "$is_wt" "$wt_top" "$main_top" \
+      > "$GIT_CACHE"
   fi
 fi
 
@@ -440,32 +506,63 @@ fi
 ws_part=""
 
 if $is_git; then
-  proj_name="${proj_dir##*/}"
-  ws_part="${proj_name}"
-
-  branch_display="$git_branch"
-  [ -n "$wt_name" ] && branch_display="$wt_name"
-
-  if [ -n "$branch_display" ]; then
-    ws_part="${ws_part} ${BRANCH} ${branch_display}"
+  if $is_wt; then
+    # Worktree session. Line 2 names the dir the session was registered to,
+    # unless that dir is the worktree itself (session launched inside it) —
+    # then the repo's main checkout is the more useful anchor, and the
+    # worktree line below states where the worktree sits relative to it.
+    ws_dir="$proj_dir"
+    case "$proj_dir" in
+      "$wt_top"|"$wt_top"/*) [ -n "$main_top" ] && ws_dir="$main_top" ;;
+    esac
+    case "$ws_dir" in
+      "$HOME"|"$HOME"/*) ws_part="~${ws_dir:${#HOME}}" ;;
+      *) ws_part="$ws_dir" ;;
+    esac
+  else
+    ws_part="${proj_dir##*/}"
+    [ -n "$git_branch" ] && ws_part="${ws_part} ${BRANCH} ${git_branch}"
   fi
 
   if [ -n "$git_icons" ]; then
     ws_part="${ws_part} [${git_icons}]"
   fi
 else
-  if [[ "$proj_dir" == "$HOME"* ]]; then
-    ws_part="~${proj_dir:${#HOME}}"
-  else
-    ws_part="$proj_dir"
-  fi
+  case "$proj_dir" in
+    "$HOME"|"$HOME"/*) ws_part="~${proj_dir:${#HOME}}" ;;
+    *) ws_part="$proj_dir" ;;
+  esac
 fi
 
-# Working directory if different from project dir
-if [ -n "$cur_dir" ] && [ "$cur_dir" != "$proj_dir" ]; then
+# Working directory if different from project dir. Suppressed in worktree
+# sessions: cwd is inside the worktree by definition there, so the worktree
+# line below already states it and this would only restate it wrongly.
+if ! $is_wt && [ -n "$cur_dir" ] && [ "$cur_dir" != "$proj_dir" ]; then
   rel_cwd="${cur_dir#"$proj_dir"/}"
   [ "$rel_cwd" = "$cur_dir" ] && rel_cwd="${cur_dir##*/}"
   ws_part="${ws_part} > ./${rel_cwd}"
+fi
+
+# --- Worktree line (own row; long paths are truncated by Claude Code,
+#     never wrapped, so it never shares a row with the workspace) ---
+wt_line=""
+if $is_wt && [ -n "$wt_top" ]; then
+  # Anchor on the repo's main checkout: stable no matter where the session
+  # was launched, and it is the "git checkout perspective" of the worktree.
+  wt_base="${main_top:-${proj_dir:-$cur_dir}}"
+  wt_disp=$(relpath "$wt_base" "$wt_top")
+
+  # A worktree under $HOME reads better as ~/... than as a ../ chain that
+  # climbs back out through it — take whichever renders shorter. Match the
+  # path component boundary: /home/id-other is not under /home/id.
+  case "$wt_top" in
+    "$HOME"|"$HOME"/*)
+      wt_abs="~${wt_top:${#HOME}}"
+      [ "${#wt_abs}" -lt "${#wt_disp}" ] && wt_disp="$wt_abs"
+      ;;
+  esac
+
+  wt_line=" ${WTREE} ${wt_disp}"
 fi
 
 sid_part="| ${session_id}"
@@ -475,7 +572,13 @@ total_len=$(( host_prefix_len + ${#ws_part} + 1 + ${#sid_part} ))
 
 # --- Buffered output: emit all lines in one write ---
 if [ "$total_len" -le 90 ]; then
-  printf '%s\n%s%s %s\n' "$line1" "$host_prefix" "$ws_part" "$sid_part"
+  out=$(printf '%s\n%s%s %s' "$line1" "$host_prefix" "$ws_part" "$sid_part")
 else
-  printf '%s\n%s%s\n%s\n' "$line1" "$host_prefix" "$ws_part" "$sid_part"
+  out=$(printf '%s\n%s%s\n%s' "$line1" "$host_prefix" "$ws_part" "$sid_part")
+fi
+
+if [ -n "$wt_line" ]; then
+  printf '%s\n%s\n' "$out" "$wt_line"
+else
+  printf '%s\n' "$out"
 fi
