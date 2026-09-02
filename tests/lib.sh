@@ -11,18 +11,30 @@ STATUSLINE="${REPO_DIR}/statusline.sh"
 # Lets pace/countdown calculations be deterministic across hosts.
 NOW=1747000000
 
+# All ordinary test subprocesses must ignore any live omp cache. The fixture
+# runner in test_omp_usage.sh explicitly overrides this with 0 after supplying
+# a cache and a non-refreshing TTL.
+export STATUSLINE_OMP_DISABLE=1
+
 # Pass/fail accounting. Each test file sources lib.sh, runs assertions,
 # then calls test_summary at exit; the runner sums exit codes.
 PASS=0
 FAIL=0
 CURRENT_TEST=""
 
-# Each invocation of statusline.sh writes /tmp/statusline-${session_id}.json,
-# /tmp/statusline-latest.json, and /tmp/claude-sl-git. Sweep them at exit so
-# the suite leaves no debris.
+# Each invocation of statusline.sh may write payload tee files and the git
+# cache. The omp fixture and tee paths below are owned by test_omp_usage.sh.
 _test_cleanup() {
   rm -f /tmp/statusline-test-session.json \
         /tmp/statusline-abc-123-test.json \
+        /tmp/statusline-omp-empty.json \
+        /tmp/statusline-omp-anthropic.json \
+        /tmp/statusline-omp-all-codex.json \
+        /tmp/statusline-omp-spark.json \
+        /tmp/statusline-omp-unknown-codex.json \
+        /tmp/statusline-omp-gaps.json \
+        /tmp/statusline-tee-disabled.json \
+        /tmp/statusline-tee-default.json \
         /tmp/statusline-latest.json \
         /tmp/claude-sl-git
 }
@@ -91,7 +103,9 @@ build_payload() {
 # STATUSLINE_NOW_EPOCH overrides the system clock so pace tests are deterministic.
 invoke_statusline() {
   local payload="$1"
-  printf '%s' "$payload" | STATUSLINE_NOW_EPOCH="$NOW" bash "$STATUSLINE"
+  # Hermetic by default: the omp usage source is off unless a test opts in
+  # via STATUSLINE_OMP_CACHE fixtures (see test_omp_usage.sh).
+  printf '%s' "$payload" | STATUSLINE_NOW_EPOCH="$NOW" STATUSLINE_OMP_DISABLE=1 bash "$STATUSLINE"
 }
 
 # Convenience: extract the Nth output line (0-based) from a captured stdout.

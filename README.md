@@ -1,30 +1,36 @@
 # claude-status-line
 
-A custom status line for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that shows session metrics and workspace info, replicating the shell prompt that Claude Code hides during a session.
+A custom status line for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that shows session metrics and workspace info, replicating the shell prompt that Claude Code hides during a session. Claude Code and the omp footer extension are both consumers of this renderer.
 
 ## Layout
 
-The status line renders two lines, plus a third line whenever the session is working inside a git worktree.
+The renderer always emits a payload row and a workspace row. Between them it inserts a cache row whenever the `omp usage --json` cache contributed a window that Claude Code's own payload cannot carry, and it appends the active worktree row last when the session is inside a linked worktree. The split is by provenance, not by width: the payload has no terminal-width field, so a fixed rule is the only one that cannot mis-wrap. It also keeps the first row inside about 85 columns.
 
-**Line 1 — Model, context window, and rate limits:**
+**Payload row (first) — everything Claude Code itself supplies:**
 
 ```
 Opus:high ▓▓░░ 13% (135K) / 1.0M | 5h ░░░░ 4% 02:50 | 7d ▓▓▓▓▓░░ 72%/83% Wed (1d3h) | s7d ▓▓░░░░░ 33%/83%
 ```
 
-**Line 2 — Workspace (starship-style) and session ID:**
+**Cache row (only when the usage cache adds a window):**
+
+```
+f7d ▓▓▓▓░░░ 58%/75% | c5h ▓░░░░░░ 10%/60% | c7d ▓▓░░░░░ 20%/87% | cs5h ▓▓░░░░░ 30%/40% | cs7d ▓▓▓░░░░ 40%/75%
+```
+
+**Workspace row:**
 
 ```
 my-project  main [+!?] | 776fca86-0d70-46cf-a18a-182e73101fc6
 ```
 
-**Line 3 — Active git worktree (only inside a linked worktree):**
+**Active git worktree row (only inside a linked worktree):**
 
 ```
  ../.worktrees/my-project/my-branch
 ```
 
-## Line 1 breakdown
+## Payload and cache row breakdown
 
 | Segment | Example | Source field | Formula / logic |
 |---------|---------|-------------|-----------------|
@@ -42,14 +48,25 @@ my-project  main [+!?] | 776fca86-0d70-46cf-a18a-182e73101fc6
 | 7-day reset | `Wed` or `02:50` | `rate_limits.seven_day.resets_at` | If reset is **<24h away**: time-of-day (`HH:MM`). Otherwise: abbreviated day name (`ddd`). |
 | 7-day countdown | `(1d3h)` | derived | `(NdMh)` ≥24h, `(Nh)` <24h, `(0h)` if past. |
 | Sonnet 7d bar + actual/pace | `s7d ▓▓░░░░░ 33%/83%` | `rate_limits.seven_day_sonnet.*` *or* `rate_limits.seven_day.sonnet.*` (probed defensively) | Same 7-segment + pace render as `7d`, but **without** the day-of-week or countdown (those duplicate the all-models segment). Suppressed entirely when no Sonnet field is present. |
+| Fable 7d bar + actual/pace | `f7d ▓▓▓▓░░░ 58%/75%` | `omp usage --json`: `anthropic:7d:fable` | Same seven-slot bar and pace overlay as `s7d`, without a day or countdown. Cache row. |
+| Codex 5h bar + actual/pace | `c5h ▓░░░░░░ 10%/60%` | `omp usage --json`: non-Spark `openai-codex` limit for `5h` | Seven slots plus pace based on that limit's own window duration. Cache row. |
+| Codex 7d bar + actual/pace | `c7d ▓▓░░░░░ 20%/87%` | `omp usage --json`: non-Spark `openai-codex` limit for `7d` | Seven slots plus pace based on that limit's own window duration. Cache row. |
+| Spark Codex 5h bar + actual/pace | `cs5h ▓▓░░░░░ 30%/40%` | `omp usage --json`: Spark `openai-codex` limit for `5h` | `cs` keeps Spark visibly separate from ordinary Codex. Cache row. |
+| Spark Codex 7d bar + actual/pace | `cs7d ▓▓▓░░░░ 40%/75%` | `omp usage --json`: Spark `openai-codex` limit for `7d` | `cs` keeps Spark visibly separate from ordinary Codex. Cache row. |
 
-The rate limit sections (`5h …`, `7d …`, `s7d …`) only appear when the corresponding JSON fields are populated. Each section is separated by ` | `.
+The payload sections (`5h …`, `7d …`, `s7d …`) only appear when populated and are separated by ` | `. The cache row holds `f7d`, `c5h`, `c7d`, `cs5h`, and `cs7d`, in that fixed order with no leading separator, and exists only when at least one of them has data.
+
+### omp-backed limits
+
+When enabled, the renderer reads the verbatim `omp usage --json` cache at `${STATUSLINE_OMP_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline/omp-usage.json}`. It can consume that cache without an `omp` binary; when the cache is at least `STATUSLINE_OMP_TTL` seconds old and `omp` is available, it refreshes it with `omp usage --json`. The default TTL is 60 seconds, and a failed refresh keeps the previous cache. The omp footer extension sets a 300-second TTL after it writes the cache so this renderer trusts that fresh snapshot rather than spawning `omp`.
+
+Only limits whose `amount.unit` is `percent` render. Cache data gap-fills individual missing `5h`, `7d`, and `s7d` payload fields; a value present in the Claude Code payload always wins. Codex labels use `scope.windowId`, then `window.id`, then a `durationMs` fallback (`18000000` → `5h`, `604800000` → `7d`). A Spark tier (`scope.tier == "spark"` or an id containing `:spark:`) gets the `cs` prefix. Unknown window kinds are omitted.
 
 > **Sonnet field availability:** As of Claude Code 2.1.128 there is no documented Sonnet-only 7d field in the statusline JSON — only `rate_limits.five_hour` and `rate_limits.seven_day`. The `s7d` segment is wired up to two probable paths (`rate_limits.seven_day_sonnet` and `rate_limits.seven_day.sonnet`) so it lights up automatically the moment Anthropic exposes one. Until then it stays silent.
 
-## Line 2 breakdown
+## Workspace row breakdown
 
-Line 2 mimics a [Starship](https://starship.rs/) prompt. The format varies by scenario:
+The workspace row mimics a [Starship](https://starship.rs/) prompt. The format varies by scenario:
 
 | Scenario | Example |
 |----------|---------|
@@ -58,22 +75,22 @@ Line 2 mimics a [Starship](https://starship.rs/) prompt. The format varies by sc
 | Local, git + different cwd | `my-project  main [!?] > ./subdir \| 776fca86-...` |
 | Local, no git + different cwd | `my-project > ./subdir \| 776fca86-...` |
 | SSH, git | `id@oam my-project  main [!?] \| 776fca86-...` |
-| Worktree (line 3 appears) | `~/repos/my-project [!?] \| 776fca86-...`<br>` ../.worktrees/my-project/my-branch` |
+| Worktree (worktree row appears) | `~/repos/my-project [!?] \| 776fca86-...`<br>` ../.worktrees/my-project/my-branch` |
 
 | Segment | Source field | Logic |
 |---------|-------------|-------|
 | SSH host prefix | `$SSH_CONNECTION` env var | Only shown in SSH sessions. Styled with bold + inverted + true color from the active Starship palette's `color1`. |
 | Project path | `workspace.project_dir` | Git main tree: basename only. Non-git: full path with `~` home abbreviation. In a worktree: full `~`-abbreviated path of the dir the session was registered to — or of the repo's main checkout when the session was launched inside the worktree itself. |
-| Branch | `git branch --show-current` | `` (U+E0A0 Powerline icon) + name. Omitted in worktree sessions, where line 3 identifies the checkout instead. |
+| Branch | `git branch --show-current` | `` (U+E0A0 Powerline icon) + name. Omitted in worktree sessions, where the worktree row identifies the checkout instead. |
 | Git status | `git diff`, `git ls-files` | Presence-only icons in brackets: `+` staged, `!` modified, `?` untracked. No counts. |
-| Working directory | `workspace.current_dir` | Shown as `> ./relative` only when different from project dir. Suppressed in worktree sessions, where cwd is inside the worktree by definition and line 3 already locates it. |
+| Working directory | `workspace.current_dir` | Shown as `> ./relative` only when different from project dir. Suppressed in worktree sessions, where cwd is inside the worktree by definition and the worktree row already locates it. |
 | Session ID | `session_id` | UUID at end, separated by ` \| `. |
 
-**Width limit:** 90 characters. If line 2 exceeds this, the session ID wraps to a new line. Claude Code itself never wraps — it truncates an overlong row with `…` — which is why the worktree path gets its own row rather than being appended here.
+**Width limit:** 90 characters. If the workspace row exceeds this, the session ID wraps to a new line. Claude Code itself never wraps — it truncates an overlong row with `…` — which is why the worktree path gets its own row rather than being appended here.
 
-## Line 3 breakdown — active git worktree
+## Worktree row breakdown — active git worktree
 
-Line 3 appears **only** when the current directory sits inside a linked worktree (one created by `git worktree add`). Main working trees render two lines exactly as before.
+The worktree row appears **only** when the current directory sits inside a linked worktree (one created by `git worktree add`). Main working trees render their quota and workspace rows exactly as before.
 
 ```
  ../.worktrees/my-project/my-branch
@@ -91,16 +108,28 @@ Worktree layouts seen on this fleet, all rendered by the same logic: central poo
 
 ## Out-of-band JSON capture
 
-Claude Code only exposes `rate_limits.*` to the statusline command — not to hooks or stream-json. The bash script tees its stdin payload to two files on every render:
+Claude Code exposes `rate_limits.*` only to the statusline command, not to hooks or stream-json. By default, the bash script tees each Claude payload to two files:
 
-- `/tmp/statusline-${session_id}.json` — per-session capture, races-free across concurrent sessions
-- `/tmp/statusline-latest.json` — always the most recent payload from any session
+- `/tmp/statusline-${session_id}.json` — per-session capture, race-free across concurrent sessions
+- `/tmp/statusline-latest.json` — the most recent Claude payload
 
-This lets other tools on the machine (cron jobs, dashboards, debugging scripts) read live rate-limit data without subscribing to Claude Code internals.
+Set `STATUSLINE_PAYLOAD_TEE=0` for a non-Claude render. The omp footer extension does this so it cannot overwrite `/tmp/statusline-latest.json`, which shift-change's `clock-out.sh` uses to recover the active Claude session ID.
+
+## Environment
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `STATUSLINE_NOW_EPOCH` | current Unix epoch | Overrides “now” for deterministic pace and countdown tests. |
+| `STATUSLINE_OMP_DISABLE` | `0` | Set to `1` to disable the omp cache source and refresh entirely. |
+| `STATUSLINE_OMP_CACHE` | `${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline/omp-usage.json` | Verbatim `omp usage --json` cache path. |
+| `STATUSLINE_OMP_TTL` | `60` | Cache age in seconds before an available `omp` binary refreshes it. A readable cache is still rendered when refresh fails. |
+| `STATUSLINE_OMP_TIMEOUT` | `10` | Seconds allowed for the cache refresh command. |
+| `STATUSLINE_PAYLOAD_TEE` | enabled unless exactly `0` | Set to `0` to suppress both `/tmp/statusline-${session_id}.json` and `/tmp/statusline-latest.json`. |
+| `STATUSLINE_SSH_PROBE_PROC` | `1` | Set to `0` to disable the parent-process SSH environment fallback used for multiplexers. |
 
 ## Deterministic test clock
 
-The script honors `STATUSLINE_NOW_EPOCH` (env var) — when set to a Unix timestamp, all "now"-relative computations (pace, countdown, "is reset today?") use that value instead of the system clock.
+The script honors `STATUSLINE_NOW_EPOCH` — when set to a Unix timestamp, all “now”-relative computations (pace, countdown, “is reset today?”) use that value instead of the system clock.
 
 ```sh
 # Pin the clock for repeatable rendering
@@ -217,7 +246,7 @@ This matches Starship's `style_user = "color1 bold inverted"`. Each machine has 
 
 ## How it works
 
-Claude Code's [status line feature](https://docs.anthropic.com/en/docs/claude-code/statusline) runs a configured command after each assistant message (debounced at 300ms). The command receives a JSON payload on stdin and prints two or three lines to stdout.
+Claude Code's [status line feature](https://docs.anthropic.com/en/docs/claude-code/statusline) runs a configured command after each assistant message (debounced at 300ms). The command receives a JSON payload on stdin and prints a payload row plus a workspace row, with optional cache and worktree rows.
 
 The `statusLine` property in `~/.claude/settings.json` configures this:
 
@@ -256,7 +285,7 @@ The `statusLine` property in `~/.claude/settings.json` configures this:
 
 ### Performance
 
-- **Single jq invocation:** all 17 fields extracted in one call, parsed with `IFS=$'\x1f' read`. Avoids forking `jq` per-field.
+- **Payload parsing:** one jq invocation extracts the Claude payload fields; an enabled omp cache uses one additional jq pass for its provider limits.
 - **Git caching:** git status is cached in a temp file with a 5-second TTL. On cache hit, zero git commands run.
 - **Early-exit git checks:** `head -1` on git output avoids reading full diffs just to check if changes exist.
 - **Buffered output:** one final `printf` call emits all output rows, avoiding pty-flush splits that would otherwise render line 1 alone for a frame.
@@ -267,4 +296,4 @@ The `statusLine` property in `~/.claude/settings.json` configures this:
 bash tests/run.sh
 ```
 
-Runs 80 bash assertions: 55 in `test_statusline.sh` for context bands, rate-limit bars, pace/countdown, model/effort, SSH, and absent-field handling; and 25 in `test_worktree.sh`, which builds real repos with `git worktree add` layouts (central pool, flat pool, sibling suffix dirs, in-tree pools, out-of-home scratchpads, detached HEAD, sessions launched inside the worktree, `$HOME` component boundaries, and the submodule guard) and asserts the rendered rows. Tests pin the clock via `STATUSLINE_NOW_EPOCH=1747000000` so pace and countdown are deterministic across hosts.
+Runs 102 bash assertions: 55 in `test_statusline.sh` for context bands, rate-limit bars, pace/countdown, model/effort, SSH, and absent-field handling; 25 in `test_worktree.sh`, which builds real repos with `git worktree add` layouts; and 22 in `test_omp_usage.sh` for cached Fable/Codex rendering, field-level gap fill, cache row order, and payload tee gating. Tests pin the clock via `STATUSLINE_NOW_EPOCH=1747000000` so pace and countdown are deterministic across hosts.
