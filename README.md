@@ -4,18 +4,19 @@ A custom status line for [Claude Code](https://docs.anthropic.com/en/docs/claude
 
 ## Layout
 
-The renderer always emits a payload row and a workspace row. Between them it inserts a cache row whenever the `omp usage --json` cache contributed a window that Claude Code's own payload cannot carry, and it appends the active worktree row last when the session is inside a linked worktree. The split is by provenance, not by width: the payload has no terminal-width field, so a fixed rule is the only one that cannot mis-wrap. It also keeps the first row inside about 85 columns.
+The renderer always emits a model row and a workspace row. Between them it emits one quota row per provider that has a window to show, and it appends the active worktree row last when the session is inside a linked worktree.
 
-**Payload row (first) — everything Claude Code itself supplies:**
-
-```
-Opus:high ▓▓░░ 13% (135K)/1.0M | 5h 4% 02:50 | 7d 72%/83% Wed (1d3h) | s7d 33%/83%
-```
-
-**Cache row (only when the usage cache adds a window):**
+**Model row (first) — model, effort, and context:**
 
 ```
-f7d 58%/75% | c5h 10%/60% | c7d 20%/87% | cs5h 30%/40% | cs7d 40%/75%
+Opus:high ▓▓░░ 13% (135K)/1.0M
+```
+
+**Quota rows — one per provider, column-aligned:**
+
+```
+  󰇎 7% 01:41 │  43%/33% (Wed)    │ 󰯻  2%/50% (Tue)
+󰰗  󱅎 0% 02:41 │  100%/98% (3h15m) │   4%/57% (Tue)
 ```
 
 **Workspace row:**
@@ -30,7 +31,17 @@ my-project  main [+!?] | 776fca86-0d70-46cf-a18a-182e73101fc6
  ../.worktrees/my-project/my-branch
 ```
 
-## Payload and cache row breakdown
+### The grid
+
+Quota rows are a grid, not a list. The columns are, in order: five hours, the provider's own seven days, its variant tier's seven days, then Sonnet. Every row supplies a cell for each column — empty where that provider has no such window — so column N means the same window kind on every row and a cross-provider comparison is a vertical glance.
+
+Each column is padded to the widest cell any row puts in it, measured after ANSI escapes are stripped so color never inflates the width. A column no row fills collapses to nothing rather than padding to an empty gap, which is why Sonnet currently costs no space. Where a provider has no window for a column that another row fills, the cell is spanned by blanks *including* the divider: a hollow `│` would read as a meter that exists and is empty, which is a different claim.
+
+Five-hour percentages are additionally right-aligned to the widest five-hour reading on screen, so a fleet whose meters all read single digits pays for no dead column, and one meter reaching 100% widens the others to match instead of stepping out of line.
+
+Alignment assumes a UTF-8 locale and single-width glyphs; widths come from `${#}`. Under `LC_ALL=C` the padding counts bytes and the grid misaligns.
+
+## Model and quota row breakdown
 
 | Segment | Example | Source field | Formula / logic |
 |---------|---------|-------------|-----------------|
@@ -39,21 +50,31 @@ my-project  main [+!?] | 776fca86-0d70-46cf-a18a-182e73101fc6
 | Context percentage | `13%` | `context_window.used_percentage` | `floor()` of the raw value. |
 | Current tokens | `(135K)` | `current_usage.input + output + cache_creation + cache_read` | Falls back to `floor(used_pct * ctx_size / 100)` when `current_usage` is null (early in session). It joins the window size without a surrounding slash space: `(135K)/1.0M`. |
 | Context window size | `/1.0M` | `context_window.context_window_size` | Formatted: <1K raw, 1K-999K as `NK`, ≥1M as `N.NM`. |
-| 5-hour usage | `5h 4%` | `rate_limits.five_hour.used_percentage` | Uncolored percentage with no bar. |
-| 5-hour reset time | `02:50` | `rate_limits.five_hour.resets_at` | Optional Unix epoch → local time-of-day (`HH:MM`). |
-| 7-day actual / pace | `7d 72%/83%` | `rate_limits.seven_day.*` | No bar. The actual `72%` token is green when actual ≤ pace and red when actual > pace. The `/83%` pace half stays default-colored. |
-| 7-day reset | `Wed` or `02:50` | `rate_limits.seven_day.resets_at` | If reset is **<24h away**: time-of-day (`HH:MM`). Otherwise: abbreviated day name (`ddd`). |
-| 7-day countdown | `(1d3h)` | derived | `(NdMh)` ≥24h, `(Nh)` <24h, `(0h)` if past. |
-| Sonnet 7d actual / pace | `s7d 33%/83%` | `rate_limits.seven_day_sonnet.*` *or* `rate_limits.seven_day.sonnet.*` (probed defensively) | Same colored actual / uncolored pace rule as `7d`, without a day or countdown. Suppressed entirely when no Sonnet field is present. |
-| Fable 7d actual / pace | `f7d 58%/75%` | `omp usage --json`: `anthropic:7d:fable` | Same colored actual / uncolored pace rule as `s7d`. Cache row. |
-| Codex 5h actual / pace | `c5h 10%/60%` | `omp usage --json`: non-Spark `openai-codex` limit for `5h` | Same colored actual / uncolored pace rule, paced from that limit's own window duration. Cache row. |
-| Codex 7d actual / pace | `c7d 20%/87%` | `omp usage --json`: non-Spark `openai-codex` limit for `7d` | Same colored actual / uncolored pace rule, paced from that limit's own window duration. Cache row. |
-| Spark Codex 5h actual / pace | `cs5h 30%/40%` | `omp usage --json`: Spark `openai-codex` limit for `5h` | `cs` keeps Spark visibly separate from ordinary Codex; same color rule. Cache row. |
-| Spark Codex 7d actual / pace | `cs7d 40%/75%` | `omp usage --json`: Spark `openai-codex` limit for `7d` | `cs` keeps Spark visibly separate from ordinary Codex; same color rule. Cache row. |
+| Claude row label | `` | — | Opens the Anthropic quota row. |
+| Codex row label | `` | — | Opens the `openai-codex` quota row. |
+| 5-hour usage | ` 4%` | `rate_limits.five_hour.used_percentage`, or `omp usage --json` | Uncolored percentage, no bar, no pace — pace over five hours is noise. Right-aligned to the widest five-hour reading. |
+| 5-hour reset | `02:50` | `…five_hour.resets_at` | Wall-clock time-of-day (`HH:MM`). Over so short a span a clock time is sharper than a countdown. |
+| Own 7-day actual / pace | ` 72%/83%` | `rate_limits.seven_day.*`, or `openai-codex:primary` | The actual `72%` token is green when actual ≤ pace and red when actual > pace. The `/83%` pace half stays default-colored. |
+| 7-day reset | `(Wed)`, `(13h)`, `(3h15m)` | `…resets_at` | Scaled to what is actionable at that range — see below. |
+| Fable 7-day | `󰯻  58%/75%` | `omp usage --json`: `anthropic:7d:fable` | Variant-tier column of the Claude row. Same color rule. |
+| Spark 7-day | ` 40%/75%` | `omp usage --json`: `openai-codex:spark:secondary` | Variant-tier column of the Codex row. Spark's seven-day window resets on its own schedule, independent of ordinary Codex. |
+| Spark 5-hour | ` 30%` | `omp usage --json`: `openai-codex:spark:primary` | Codex exposes **no** five-hour window of its own today, only Spark's, so this normally occupies the Codex row's five-hour column. A Codex 5h cell renders ahead of it if one ever appears. |
+| Sonnet 7-day | `s 33%/83%` | `rate_limits.seven_day_sonnet.*` *or* `rate_limits.seven_day.sonnet.*` (probed defensively) | Fourth column of the Claude row. Suppressed entirely when no Sonnet field is present. |
 
-The payload sections (`5h …`, `7d …`, `s7d …`) only appear when populated and are separated by ` | `. The cache row holds `f7d`, `c5h`, `c7d`, `cs5h`, and `cs7d`, in that fixed order with no leading separator, and exists only when at least one of them has data.
+### Reset scale
 
-A window that reports a percentage but no reset time has no knowable pace — `omp usage --json` omits `window.resetsAt` on a window nothing has spent yet — so that segment degrades to a bare uncolored percentage (`f7d 0%`) and keeps its place. It is never dropped, and it never claims a pace of zero. The same rule applies to `7d`, which then also loses its reset and countdown.
+A multi-day window prints its reset at the precision that is actionable at that range:
+
+| Remaining | Renders | Why |
+|-----------|---------|-----|
+| ≥ 24h | `(Tue)` | A seven-day window never runs long enough for the weekday to wrap, so the day name is unambiguous and needs no date. |
+| 4h – 24h | `(13h)` | Inside a day the weekday stops discriminating. |
+| < 4h | `(3h15m)` | Minutes start to matter. Zero-padded (`3h04m`) so the field does not jitter width. |
+| past | `(now)` | |
+
+Five-hour windows do not use this scale — they print a wall-clock time.
+
+A window that reports a percentage but no reset time has no knowable pace — `omp usage --json` omits `window.resetsAt` on a window nothing has spent yet — so that cell degrades to a bare uncolored percentage (` 0%`) and keeps its column. It is never dropped, and it never claims a pace of zero. A five-hour cell in the same state keeps its percentage and drops the clock.
 
 ### omp-backed limits
 
