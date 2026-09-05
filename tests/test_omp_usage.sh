@@ -18,6 +18,8 @@ SPARK_CACHE=/tmp/statusline-omp-spark.json
 UNKNOWN_CODEX_CACHE=/tmp/statusline-omp-unknown-codex.json
 GAPS_CACHE=/tmp/statusline-omp-gaps.json
 NO_RESET_CACHE=/tmp/statusline-omp-no-reset.json
+WIDTH_CACHE=/tmp/statusline-omp-width.json
+GRID_CACHE=/tmp/statusline-omp-grid.json
 
 # Each fixture is newer than the deterministic test clock and has a long TTL,
 # so the statusline reads only the cache and never invokes omp.
@@ -109,9 +111,9 @@ assert_eq "$out_without_omp" "$out_empty_cache" "empty cache output"
 start_test "no Codex data emits no quota row"
 assert_eq 2 "$(row_count "$out_empty_cache")" "row count without Codex"
 
-# The source order is deliberately shuffled: the cache row must always read
-# f7d, c5h, c7d, cs5h, cs7d. The regular 5h limit uses scope.windowId rather
-# than the id.
+# The source order is deliberately shuffled: the Codex row must always read
+# c5h, cs5h, c7d, cs7d. The regular 5h limit uses scope.windowId rather
+# than the id. Day names are matched as a class so the suite is TZ-independent.
 fable_reset=$((NOW + 42 * 3600))
 c5h_reset=$((NOW + 2 * 3600))
 c7d_reset=$((NOW + 21 * 3600))
@@ -145,38 +147,105 @@ out_anthropic=$(run_with_fixture "$ANTHROPIC_CACHE" "$payload")
 out_all_codex=$(run_with_fixture "$ALL_CODEX_CACHE" "$payload")
 line1_anthropic=$(line_n 0 "$out_anthropic")
 line1_all_codex=$(line_n 0 "$out_all_codex")
-codex_row=$(line_n 1 "$out_all_codex" | strip_ansi)
+claude_row=$(provider_row "$G_CLAUDE_ROW" "$out_all_codex" | strip_ansi)
+codex_row=$(provider_row "$G_CODEX_ROW" "$out_all_codex" | strip_ansi)
 
-start_test "row 1 never carries a cache-only window"
-assert_no_match 'f7d' "$(printf '%s' "$line1_all_codex" | strip_ansi)"
+start_test "row 1 never carries a quota window"
+assert_no_match '58%|20%' "$(printf '%s' "$line1_all_codex" | strip_ansi)"
 start_test "Codex data leaves row 1 byte-identical"
 assert_eq "$line1_anthropic" "$line1_all_codex" "row 1 with Codex"
-start_test "cache row uses fixed f7d c5h c7d cs5h cs7d order"
-assert_match '^f7d 58%/75% \| c5h 10%/60% \| c7d 20%/87% \| cs5h 30%/40% \| cs7d 40%/75%$' "$codex_row"
+start_test "Codex row uses fixed c5h cs5h c7d cs7d order"
+assert_match "^${G_CODEX_ROW}  ${G_5H_T} 10% [0-9]{2}:[0-9]{2} . ${G_SPARK5H_T} 30% [0-9]{2}:[0-9]{2} . ${G_7D_T} 20%/87% \(21h\) . ${G_SPARK_T} ${G_7D_T} 40%/75% \([A-Z][a-z]{2}\)$" "$codex_row"
+start_test "Fable sits on the Claude row, not the Codex row"
+assert_match "^${G_CLAUDE_ROW} +${G_FABLE_T} ${G_7D_T} 58%/75% \([A-Z][a-z]{2}\)$" "$claude_row"
 
-raw_cache_row=$(line_n 1 "$out_all_codex")
-start_test "cache paced actual percentages use green when under pace"
-assert_match "${ESC}\\[32m58%${ESC}\\[0m/75%.*${ESC}\\[32m10%${ESC}\\[0m/60%.*${ESC}\\[32m20%${ESC}\\[0m/87%.*${ESC}\\[32m30%${ESC}\\[0m/40%.*${ESC}\\[32m40%${ESC}\\[0m/75%" "$raw_cache_row"
-start_test "Codex data adds exactly one row before the workspace row"
-assert_eq 3 "$(row_count "$out_all_codex")" "row count with Codex"
+raw_codex_row=$(provider_row "$G_CODEX_ROW" "$out_all_codex")
+start_test "paced actual percentages use green when under pace"
+assert_match "${ESC}\\[32m20%${ESC}\\[0m/87%.*${ESC}\\[32m40%${ESC}\\[0m/75%" "$raw_codex_row"
+start_test "Codex data adds its own row before the workspace row"
+assert_eq 4 "$(row_count "$out_all_codex")" "row count with Codex"
 start_test "anthropic extra (USD) never renders"
 assert_no_match 'extra|91%' "$(printf '%s' "$out_all_codex" | strip_ansi)"
 start_test "a cache-only Anthropic window still gets its own row"
 assert_eq 3 "$(row_count "$out_anthropic")" "row count with Fable only"
-start_test "the Fable-only cache row carries nothing else"
-assert_eq 'f7d 58%/75%' "$(line_n 1 "$out_anthropic" | strip_ansi)" "Fable-only cache row"
+start_test "the Fable-only Claude row carries nothing else"
+assert_match "^${G_CLAUDE_ROW}  ${G_FABLE_T} ${G_7D_T} 58%/75% \([A-Z][a-z]{2}\)$" "$(provider_row "$G_CLAUDE_ROW" "$out_anthropic" | strip_ansi)"
 
 # Spark identity comes from scope.tier even when the id lacks :spark:.
 spark_limit=$(limit_fixture openai-codex openai-codex:custom 25 percent spark 5h 18000000 "$cs5h_reset")
 spark_fixture=$(jq -nc --argjson spark "$spark_limit" '{reports:[{provider:"openai-codex", limits:[$spark]}]}')
 write_fixture "$SPARK_CACHE" "$spark_fixture"
 out_spark=$(run_with_fixture "$SPARK_CACHE" "$payload")
-spark_row=$(line_n 1 "$out_spark" | strip_ansi)
+spark_row=$(provider_row "$G_CODEX_ROW" "$out_spark" | strip_ansi)
 
-start_test "spark-only Codex data is visibly labeled cs5h"
-assert_match '^cs5h 25%/40%$' "$spark_row"
-start_test "spark-only Codex data does not collapse to c5h"
-assert_no_match '^c5h ' "$spark_row"
+start_test "spark-only Codex data carries the Spark 5h glyph"
+assert_match "^${G_CODEX_ROW}  ${G_SPARK5H_T} 25% [0-9]{2}:[0-9]{2}$" "$spark_row"
+start_test "spark-only Codex data does not use the plain 5h glyph"
+assert_no_match "${G_5H_T}" "$spark_row"
+
+# The five-hour column is padded to the widest reading on screen, across both
+# provider rows. A fixed width would either waste a column when every meter
+# reads single digits, or misalign the moment one reaches 100%.
+width_payload=$(default_payload \
+  '.rate_limits.five_hour.used_percentage=5' \
+  ".rate_limits.five_hour.resets_at=$((NOW + 2 * 3600))")
+
+narrow_limit=$(limit_fixture openai-codex openai-codex:spark:primary 7 percent spark 5h 18000000 "$cs5h_reset")
+narrow_fixture=$(jq -nc --argjson s "$narrow_limit" '{reports:[{provider:"openai-codex", limits:[$s]}]}')
+write_fixture "$WIDTH_CACHE" "$narrow_fixture"
+out_narrow=$(run_with_fixture "$WIDTH_CACHE" "$width_payload")
+
+start_test "single-digit readings on both rows get no padding"
+assert_match "^${G_CLAUDE_ROW}  ${G_5H_T} 5% " "$(provider_row "$G_CLAUDE_ROW" "$out_narrow" | strip_ansi)"
+start_test "single-digit Codex reading gets no padding either"
+assert_match "^${G_CODEX_ROW}  ${G_SPARK5H_T} 7% " "$(provider_row "$G_CODEX_ROW" "$out_narrow" | strip_ansi)"
+
+wide_limit=$(limit_fixture openai-codex openai-codex:spark:primary 100 percent spark 5h 18000000 "$cs5h_reset")
+wide_fixture=$(jq -nc --argjson s "$wide_limit" '{reports:[{provider:"openai-codex", limits:[$s]}]}')
+write_fixture "$WIDTH_CACHE" "$wide_fixture"
+out_wide=$(run_with_fixture "$WIDTH_CACHE" "$width_payload")
+
+start_test "a 100% reading widens the other row's five-hour cell to match"
+assert_match "^${G_CLAUDE_ROW}  ${G_5H_T}   5% " "$(provider_row "$G_CLAUDE_ROW" "$out_wide" | strip_ansi)"
+start_test "the 100% reading itself is not padded"
+assert_match "^${G_CODEX_ROW}  ${G_SPARK5H_T} 100% " "$(provider_row "$G_CODEX_ROW" "$out_wide" | strip_ansi)"
+
+# Every divider must sit at the same offset on both rows, whatever the cells
+# contain. A short reading on one row is padded out so the next column starts
+# level; an absent window is spanned by blanks rather than a hollow divider.
+grid_fable=$(limit_fixture anthropic anthropic:7d:fable 2 percent fable 7d 604800000 "$fable_reset")
+grid_c7d=$(limit_fixture openai-codex openai-codex:primary 100 percent default 7d 604800000 "$((NOW + 11700))")
+grid_cs7d=$(limit_fixture openai-codex openai-codex:spark:secondary 4 percent spark 7d 604800000 "$cs7d_reset")
+grid_fixture=$(jq -nc \
+  --argjson f "$grid_fable" --argjson c "$grid_c7d" --argjson s "$grid_cs7d" \
+  '{reports:[
+    {provider:"anthropic", limits:[$f]},
+    {provider:"openai-codex", limits:[$c, $s]}
+  ]}')
+write_fixture "$GRID_CACHE" "$grid_fixture"
+grid_payload=$(default_payload \
+  '.rate_limits.seven_day.used_percentage=43' \
+  ".rate_limits.seven_day.resets_at=$((NOW + 400000))")
+out_grid=$(run_with_fixture "$GRID_CACHE" "$grid_payload")
+
+# Offsets of every divider on a row, as a space-separated list. Counted in
+# characters, which is what the renderer pads in.
+divider_cols() {
+  local s=$1 i out=""
+  for ((i = 0; i < ${#s}; i++)); do
+    [ "${s:i:1}" = "$SEP_T" ] && out="${out}${i} "
+  done
+  printf '%s' "$out"
+}
+grid_claude=$(provider_row "$G_CLAUDE_ROW" "$out_grid" | strip_ansi)
+grid_codex=$(provider_row "$G_CODEX_ROW" "$out_grid" | strip_ansi)
+
+start_test "both provider rows put their dividers at identical offsets"
+assert_eq "$(divider_cols "$grid_claude")" "$(divider_cols "$grid_codex")" "divider offsets"
+start_test "the grid actually has dividers to align"
+assert_match '[0-9]' "$(divider_cols "$grid_codex")"
+start_test "a shorter cell is padded rather than shifting the next column"
+assert_match "${G_7D_T} 43%/[0-9]+% \([A-Z][a-z]{2}\)  +${SEP_T}" "$grid_claude"
 
 # No scope window, no window id, and an unknown duration must be skipped;
 # rendering a cx placeholder would hide a future schema change.
@@ -214,12 +283,13 @@ no_reset_fixture=$(jq -nc \
   ]}')
 write_fixture "$NO_RESET_CACHE" "$no_reset_fixture"
 out_no_reset=$(run_with_fixture "$NO_RESET_CACHE" "$payload")
-no_reset_row=$(line_n 1 "$out_no_reset" | strip_ansi)
 
 start_test "a window with no reset keeps its percentage and drops the pace"
-assert_eq 'f7d 0% | cs5h 7%' "$no_reset_row" "no-reset cache row"
+assert_match "^${G_CLAUDE_ROW} +${G_FABLE_T} ${G_7D_T} 0%$" "$(provider_row "$G_CLAUDE_ROW" "$out_no_reset" | strip_ansi)"
+start_test "a 5h window with no reset keeps its percentage and drops the clock"
+assert_match "^${G_CODEX_ROW}  ${G_SPARK5H_T} 7%$" "$(provider_row "$G_CODEX_ROW" "$out_no_reset" | strip_ansi)"
 start_test "a window with no reset is uncolored"
-assert_no_match "$(printf '\033')\\[3[12]m" "$(line_n 1 "$out_no_reset")"
+assert_no_match "$(printf '\033')\\[3[12]m" "$(provider_row "$G_CLAUDE_ROW" "$out_no_reset")"
 
 # Gap filling works per field: cache values fill only missing payload fields.
 five_cache_reset=$((NOW + 3 * 3600))
@@ -235,14 +305,14 @@ gaps_fixture=$(jq -nc \
   '{reports:[{provider:"anthropic", limits:[$five, $seven, $sonnet]}]}')
 write_fixture "$GAPS_CACHE" "$gaps_fixture"
 out_gaps=$(run_with_fixture "$GAPS_CACHE" "$payload")
-gaps_row=$(line_n 0 "$out_gaps" | strip_ansi)
+gaps_row=$(provider_row "$G_CLAUDE_ROW" "$out_gaps" | strip_ansi)
 
 start_test "gap-fill supplies missing 5h fields"
-assert_match '5h 12%' "$gaps_row"
+assert_match "${G_5H_T} 12%" "$gaps_row"
 start_test "gap-fill supplies missing 7d fields"
-assert_match '7d 33%/50%' "$gaps_row"
+assert_match "${G_7D_T} 33%/50%" "$gaps_row"
 start_test "gap-fill supplies missing s7d fields"
-assert_match 's7d 44%/75%' "$gaps_row"
+assert_match "s${G_7D_T} 44%/75%" "$gaps_row"
 
 payload_seven_reset=$((NOW + 12 * 3600))
 payload_sonnet_reset=$((NOW + 84 * 3600))
@@ -252,14 +322,14 @@ partial_payload=$(default_payload \
   ".rate_limits.seven_day.resets_at=$payload_seven_reset" \
   ".rate_limits.seven_day_sonnet.resets_at=$payload_sonnet_reset")
 out_partial=$(run_with_fixture "$GAPS_CACHE" "$partial_payload")
-partial_row=$(line_n 0 "$out_partial" | strip_ansi)
+partial_row=$(provider_row "$G_CLAUDE_ROW" "$out_partial" | strip_ansi)
 
 start_test "gap-fill adds a missing reset without replacing payload 5h usage"
-assert_match '5h [^|]*67% [0-9]{2}:[0-9]{2}' "$partial_row"
+assert_match "${G_5H_T} 67% [0-9]{2}:[0-9]{2}" "$partial_row"
 start_test "payload 7d values win over cached values"
-assert_match '7d [^|]*55%/92%' "$partial_row"
+assert_match "${G_7D_T} 55%/92%" "$partial_row"
 start_test "payload s7d reset wins while cached usage fills its gap"
-assert_match 's7d [^|]*44%/50%' "$partial_row"
+assert_match "s${G_7D_T} 44%/50%" "$partial_row"
 
 # A non-Claude render such as the omp footer must not clobber shift-change's
 # latest Claude payload. The default preserves the current two tee files.

@@ -105,29 +105,29 @@ start_test "pace ~25% when 126h remain"
 out=$(invoke_statusline "$(default_payload \
   '.rate_limits.seven_day.used_percentage=0' \
   ".rate_limits.seven_day.resets_at=$((NOW + 126 * 3600))")")
-stripped=$(line_n 0 "$out" | strip_ansi)
-assert_match ' 0%/25% ' "$stripped"
+stripped=$(provider_row "$G_CLAUDE_ROW" "$out" | strip_ansi)
+assert_match ' 0%/25%' "$stripped"
 
 start_test "pace = 0% just after a reset (168h remain)"
 out=$(invoke_statusline "$(default_payload \
   '.rate_limits.seven_day.used_percentage=0' \
   ".rate_limits.seven_day.resets_at=$((NOW + 168 * 3600))")")
-stripped=$(line_n 0 "$out" | strip_ansi)
-assert_match ' 0%/0% ' "$stripped"
+stripped=$(provider_row "$G_CLAUDE_ROW" "$out" | strip_ansi)
+assert_match ' 0%/0%' "$stripped"
 
 start_test "pace = 99% when 1h remains"
 out=$(invoke_statusline "$(default_payload \
   '.rate_limits.seven_day.used_percentage=0' \
   ".rate_limits.seven_day.resets_at=$((NOW + 1 * 3600))")")
-stripped=$(line_n 0 "$out" | strip_ansi)
-assert_match ' 0%/99% ' "$stripped"
+stripped=$(provider_row "$G_CLAUDE_ROW" "$out" | strip_ansi)
+assert_match ' 0%/99%' "$stripped"
 
 start_test "renders actual/pace numeric pair when both nonzero (41%/51%)"
 out=$(invoke_statusline "$(default_payload \
   '.rate_limits.seven_day.used_percentage=41' \
   ".rate_limits.seven_day.resets_at=$((NOW + 82 * 3600))")")
-stripped=$(line_n 0 "$out" | strip_ansi)
-assert_match ' 41%/51% ' "$stripped"
+stripped=$(provider_row "$G_CLAUDE_ROW" "$out" | strip_ansi)
+assert_match ' 41%/51%' "$stripped"
 
 # ============================================================
 # Describe: paced quota percentage color
@@ -137,21 +137,21 @@ start_test "paced actual is green when below pace"
 out=$(invoke_statusline "$(default_payload \
   '.rate_limits.seven_day.used_percentage=41' \
   ".rate_limits.seven_day.resets_at=$((NOW + 82 * 3600))")")
-line1=$(line_n 0 "$out")
+line1=$(provider_row "$G_CLAUDE_ROW" "$out")
 assert_match "${ESC}\\[32m41%${ESC}\\[0m/51%" "$line1"
 
 start_test "paced actual is red when above pace"
 out=$(invoke_statusline "$(default_payload \
   '.rate_limits.seven_day.used_percentage=60' \
   ".rate_limits.seven_day.resets_at=$((NOW + 82 * 3600))")")
-line1=$(line_n 0 "$out")
+line1=$(provider_row "$G_CLAUDE_ROW" "$out")
 assert_match "${ESC}\\[31m60%${ESC}\\[0m/51%" "$line1"
 
 start_test "paced actual is green at the exact pace boundary"
 out=$(invoke_statusline "$(default_payload \
   '.rate_limits.seven_day.used_percentage=50' \
   ".rate_limits.seven_day.resets_at=$((NOW + 84 * 3600))")")
-line1=$(line_n 0 "$out")
+line1=$(provider_row "$G_CLAUDE_ROW" "$out")
 assert_match "${ESC}\\[32m50%${ESC}\\[0m/50%" "$line1"
 
 # A window with a percentage but no reset time has no knowable pace. It must
@@ -159,83 +159,79 @@ assert_match "${ESC}\\[32m50%${ESC}\\[0m/50%" "$line1"
 # `resetsAt` on a window that has not been touched this period.
 out=$(invoke_statusline "$(default_payload \
   '.rate_limits.seven_day.used_percentage=41')")
-line1=$(line_n 0 "$out")
+line1=$(provider_row "$G_CLAUDE_ROW" "$out")
 start_test "7d without a reset keeps the percentage and drops the pace"
-assert_match '\| 7d 41%[[:space:]]*$' "$(printf '%s' "$line1" | strip_ansi)"
+assert_match "${G_7D_T} 41%[[:space:]]*$" "$(printf '%s' "$line1" | strip_ansi)"
 start_test "7d without a reset is uncolored"
 assert_no_match "${ESC}\\[3[12]m" "$line1"
 
 out=$(invoke_statusline "$(default_payload \
   '.rate_limits.seven_day_sonnet.used_percentage=33')")
 start_test "s7d without a reset keeps the percentage and drops the pace"
-assert_match '\| s7d 33%[[:space:]]*$' "$(line_n 0 "$out" | strip_ansi)"
+assert_match "s${G_7D_T} 33%[[:space:]]*$" "$(provider_row "$G_CLAUDE_ROW" "$out" | strip_ansi)"
 
 out=$(invoke_statusline "$(default_payload \
   '.rate_limits.five_hour.used_percentage=12')")
-line1=$(line_n 0 "$out")
+line1=$(provider_row "$G_CLAUDE_ROW" "$out")
 stripped=$(printf '%s' "$line1" | strip_ansi)
 start_test "5h percentage is uncolored and has no bar"
-assert_match '\| 5h 12%[[:space:]]*$' "$stripped"
+assert_match "${G_5H_T} 12%[[:space:]]*$" "$stripped"
 start_test "5h percentage has no color escape"
 assert_no_match "${ESC}\\[" "$line1"
 
 # ============================================================
-# Describe: reset countdown
+# Describe: reset format — day name beyond 24h, hours inside 24h,
+# hours+minutes inside 4h. Day names are matched as a class so the
+# suite does not depend on the runner's timezone.
 # ============================================================
 
-start_test "(4d2h) when 98h remain"
-out=$(invoke_statusline "$(default_payload \
-  '.rate_limits.seven_day.used_percentage=41' \
-  ".rate_limits.seven_day.resets_at=$((NOW + 98 * 3600))")")
-stripped=$(line_n 0 "$out" | strip_ansi)
-assert_match '\(4d2h\)[[:space:]]*$' "$stripped"
+reset_token() {
+  local secs=$1 out
+  out=$(invoke_statusline "$(default_payload \
+    '.rate_limits.seven_day.used_percentage=41' \
+    ".rate_limits.seven_day.resets_at=$((NOW + secs))")")
+  provider_row "$G_CLAUDE_ROW" "$out" | strip_ansi
+}
 
-start_test "DOW shown (not HH:mm) when ≥24h remain"
-out=$(invoke_statusline "$(default_payload \
-  '.rate_limits.seven_day.used_percentage=41' \
-  ".rate_limits.seven_day.resets_at=$((NOW + 98 * 3600))")")
-stripped=$(line_n 0 "$out" | strip_ansi)
-assert_match ' [0-9]{1,3}%/[0-9]{1,3}% (Mon|Tue|Wed|Thu|Fri|Sat|Sun) \([0-9]+d[0-9]+h\)[[:space:]]*$' "$stripped"
+start_test "day name when 98h remain"
+assert_match '\((Mon|Tue|Wed|Thu|Fri|Sat|Sun)\)[[:space:]]*$' "$(reset_token $((98 * 3600)))"
 
-start_test "(1d0h) at exactly 24h"
-out=$(invoke_statusline "$(default_payload \
-  '.rate_limits.seven_day.used_percentage=41' \
-  ".rate_limits.seven_day.resets_at=$((NOW + 24 * 3600))")")
-stripped=$(line_n 0 "$out" | strip_ansi)
-assert_match '\(1d0h\)[[:space:]]*$' "$stripped"
+start_test "day name at exactly 24h"
+assert_match '\((Mon|Tue|Wed|Thu|Fri|Sat|Sun)\)[[:space:]]*$' "$(reset_token $((24 * 3600)))"
 
-start_test "(3d4h) when 76h22m remain"
-out=$(invoke_statusline "$(default_payload \
-  '.rate_limits.seven_day.used_percentage=49' \
-  ".rate_limits.seven_day.resets_at=$((NOW + 274920))")")
-stripped=$(line_n 0 "$out" | strip_ansi)
-assert_match '\(3d4h\)[[:space:]]*$' "$stripped"
+start_test "hours only when 13h remain"
+assert_match '\(13h\)[[:space:]]*$' "$(reset_token $((13 * 3600)))"
 
-start_test "(3h) and HH:mm slot when 3h15m remain"
-out=$(invoke_statusline "$(default_payload \
-  '.rate_limits.seven_day.used_percentage=41' \
-  ".rate_limits.seven_day.resets_at=$((NOW + 3 * 3600 + 15 * 60))")")
-stripped=$(line_n 0 "$out" | strip_ansi)
-assert_match ' [0-9]{1,3}%/[0-9]{1,3}% [0-9]{1,2}:[0-9]{2} \(3h\)[[:space:]]*$' "$stripped"
+start_test "hours only at exactly 4h"
+assert_match '\(4h\)[[:space:]]*$' "$(reset_token $((4 * 3600)))"
 
-start_test "(0h) when only 30 minutes remain"
-out=$(invoke_statusline "$(default_payload \
-  '.rate_limits.seven_day.used_percentage=95' \
-  ".rate_limits.seven_day.resets_at=$((NOW + 30 * 60))")")
-stripped=$(line_n 0 "$out" | strip_ansi)
-assert_match '\(0h\)[[:space:]]*$' "$stripped"
+start_test "hours and minutes when 3h15m remain"
+assert_match '\(3h15m\)[[:space:]]*$' "$(reset_token $((3 * 3600 + 15 * 60)))"
+
+start_test "minutes are zero-padded when 3h04m remain"
+assert_match '\(3h04m\)[[:space:]]*$' "$(reset_token $((3 * 3600 + 4 * 60)))"
+
+start_test "hours and minutes when only 30 minutes remain"
+assert_match '\(0h30m\)[[:space:]]*$' "$(reset_token $((30 * 60)))"
+
+start_test "a reset already past reads now"
+assert_match '\(now\)[[:space:]]*$' "$(reset_token -60)"
+
+start_test "no wall-clock time is used for a multi-day window"
+assert_no_match '[0-9]{2}:[0-9]{2}' "$(reset_token $((3 * 3600 + 15 * 60)))"
 
 # ============================================================
 # Describe: graceful handling
 # ============================================================
 
-start_test "omits 5h and 7d when rate_limits absent"
+start_test "row 1 is model and context only when rate_limits absent"
 out=$(invoke_statusline "$(default_payload)")
 stripped=$(line_n 0 "$out" | strip_ansi)
 assert_match '^▓░░░ 5% \(50K\)/1\.0M[[:space:]]*$' "$stripped"
-start_test "no ' 5h ' segment when rate_limits absent";  assert_no_match ' 5h '  "$stripped"
-start_test "no ' 7d ' segment when rate_limits absent";  assert_no_match ' 7d '  "$stripped"
-start_test "no ' s7d ' segment when rate_limits absent"; assert_no_match ' s7d ' "$stripped"
+start_test "no Claude quota row when rate_limits absent"
+assert_eq '' "$(provider_row "$G_CLAUDE_ROW" "$out")" "Claude row without rate_limits"
+start_test "no Codex quota row when rate_limits absent"
+assert_eq '' "$(provider_row "$G_CODEX_ROW" "$out")" "Codex row without rate_limits"
 
 # ============================================================
 # Describe: Line 2 (workspace + session id)
@@ -276,15 +272,15 @@ start_test "s7d segment present when seven_day_sonnet payload set"
 out=$(invoke_statusline "$(default_payload \
   '.rate_limits.seven_day_sonnet.used_percentage=30' \
   ".rate_limits.seven_day_sonnet.resets_at=$((NOW + 24 * 3600))")")
-stripped=$(line_n 0 "$out" | strip_ansi)
-assert_match ' s7d ' "$stripped"
+stripped=$(provider_row "$G_CLAUDE_ROW" "$out" | strip_ansi)
+assert_match "s${G_7D_T} " "$stripped"
 
 start_test "s7d segment shows actual/pace pair"
 out=$(invoke_statusline "$(default_payload \
   '.rate_limits.seven_day_sonnet.used_percentage=30' \
   ".rate_limits.seven_day_sonnet.resets_at=$((NOW + 168 * 3600))")")
-stripped=$(line_n 0 "$out" | strip_ansi)
-assert_match ' s7d 30%/0%' "$stripped"
+stripped=$(provider_row "$G_CLAUDE_ROW" "$out" | strip_ansi)
+assert_match "s${G_7D_T} 30%/0%" "$stripped"
 
 # ============================================================
 # Extra: nested-shape sonnet under .seven_day.sonnet
@@ -294,8 +290,8 @@ start_test "s7d also reads seven_day.sonnet (nested shape)"
 out=$(invoke_statusline "$(default_payload \
   '.rate_limits.seven_day.sonnet.used_percentage=42' \
   ".rate_limits.seven_day.sonnet.resets_at=$((NOW + 168 * 3600))")")
-stripped=$(line_n 0 "$out" | strip_ansi)
-assert_match ' s7d 42%/0%' "$stripped"
+stripped=$(provider_row "$G_CLAUDE_ROW" "$out" | strip_ansi)
+assert_match "s${G_7D_T} 42%/0%" "$stripped"
 
 # ============================================================
 # Describe: SSH host prefix on Line 2 (issue #8)

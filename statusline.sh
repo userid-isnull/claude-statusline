@@ -28,6 +28,17 @@ YEL=$'\033[33m'
 RED=$'\033[31m'
 MAG=$'\033[95m'
 
+# Provider and window glyphs for the two quota rows (nerd font). Points above
+# U+FFFF need \U with eight digits; \u takes exactly four.
+G_CLAUDE=$'\ueeb1'
+G_CODEX=$'\U000f0c17'
+G_5H=$'\U000f01ce'
+G_SPARK5H=$'\U000f114e'
+G_7D=$'\ueab0'
+G_FABLE=$'\U000f0bfb'
+G_SPARK=$'\uec10'
+SEP=$'\u2502'
+
 # Now-epoch resolution: env override (deterministic tests) or system clock.
 now=${STATUSLINE_NOW_EPOCH:-$(date +%s)}
 
@@ -258,6 +269,26 @@ get_countdown() {
   fi
 }
 
+# Reset of a multi-day window, at the precision that is actionable at that
+# range: beyond 24h the weekday is enough ("Tue"); inside 24h the day name
+# stops discriminating, so hours ("13h"); inside 4h minutes start to matter
+# ("3h14m"). A 7d window never runs long enough for the weekday to wrap, so
+# the bare day name is unambiguous. Five-hour windows do not use this — they
+# print a wall-clock time, which is sharper over so short a span.
+format_reset() {
+  local resetsAt=$1 nowEpoch=$2
+  [ -z "$resetsAt" ] && return
+  local secs=$(( resetsAt - nowEpoch ))
+  if [ "$secs" -le 0 ]; then printf 'now'; return; fi
+  if [ "$secs" -lt 14400 ]; then
+    printf '%dh%02dm' "$(( secs / 3600 ))" "$(( (secs % 3600) / 60 ))"
+  elif [ "$secs" -lt 86400 ]; then
+    printf '%dh' "$(( secs / 3600 ))"
+  else
+    epoch_fmt "$resetsAt" %a
+  fi
+}
+
 # Display path of $2 as seen from $1, both absolute.
 # Same dir -> "."; descendant -> "./sub/dir"; otherwise the common-prefix
 # walk emits one ".." per level left behind. Comparison is per path
@@ -292,7 +323,7 @@ relpath() {
 }
 
 # ============================================================
-# LINE 1: Model + Context + Rate Limits
+# LINE 1: Model + Context.  LINES 2-3: one quota row per provider.
 # ============================================================
 
 IFS=$'\x1f' read -r ctx_filled ctx_color <<< "$(get_ctx_band "$cur_tokens")"
@@ -300,48 +331,85 @@ ctx_bar=$(render_ctx_bar "$ctx_filled" "$ctx_color")
 
 line1="${ctx_bar} ${used_pct}% ($(format_tokens "$cur_tokens"))/$(format_tokens "$ctx_size")"
 
-if [ -n "$rl_5h_pct" ]; then
-  rl5_time=""
-  [ -n "$rl_5h_reset" ] && rl5_time=$(epoch_fmt "${rl_5h_reset}" %H:%M)
-  line1="${line1} | 5h ${rl_5h_pct}%${rl5_time:+ ${rl5_time}}"
-fi
-
-if [ -n "$rl_7d_pct" ]; then
-  rl7_usage=$(format_paced_usage "$rl_7d_pct" "$rl_7d_reset" "$now")
-  rl7_tail=""
-  if [ -n "$rl_7d_reset" ]; then
-    hoursToReset=$(( (rl_7d_reset - now) / 3600 ))
-    if [ "$hoursToReset" -lt 24 ]; then
-      rl7_when=$(epoch_fmt "${rl_7d_reset}" %H:%M)
-    else
-      rl7_when=$(epoch_fmt "${rl_7d_reset}" %a)
-    fi
-    rl7_tail=" ${rl7_when} $(get_countdown "$rl_7d_reset" "$now")"
-  fi
-  line1="${line1} | 7d ${rl7_usage}${rl7_tail}"
-fi
-
-if [ -n "$rl_s7d_pct" ]; then
-  rls7d_usage=$(format_paced_usage "$rl_s7d_pct" "$rl_s7d_reset" "$now")
-  line1="${line1} | s7d ${rls7d_usage}"
-fi
-
-# Row 1 carries only what Claude Code's own payload can hold, so it stays inside
-# a narrow pane: model, context, and the five-hour/seven-day windows Claude Code
-# supplies (plus Sonnet, whose payload field is documented but not yet emitted).
-# Everything below is known only to the omp usage cache and gets its own row.
-cache_line=""
-cache_append() {
-  if [ -n "$cache_line" ]; then
-    cache_line="${cache_line} | $1"
-  else
-    cache_line=$1
-  fi
+# A five-hour cell: bare percentage plus a wall-clock reset. Over so short a
+# span the clock time is sharper than any countdown, and pace is meaningless.
+# The percentage is right-aligned to $4, the width of the widest five-hour
+# reading on screen, so the leading column of both provider rows lines up
+# without padding to a width no reading actually needs.
+cell_5h() {
+  local glyph=$1 pct=$2 reset=$3 width=${4:-1}
+  [ -n "$pct" ] || return
+  local when=""
+  [ -n "$reset" ] && when=" $(epoch_fmt "$reset" %H:%M)"
+  printf '%s %*s%%%s' "$glyph" "$width" "$pct" "$when"
 }
 
-if [ -n "$ofb_pct" ]; then
-  cache_append "f7d $(format_paced_usage "$ofb_pct" "$ofb_rst" "$now")"
-fi
+# A multi-day cell: actual/pace plus a scaled reset. A window with no reset
+# time has no knowable pace, so it degrades to a bare percentage and no tail.
+cell_7d() {
+  local glyph=$1 pct=$2 reset=$3 winsecs=${4:-604800}
+  [ -n "$pct" ] || return
+  local when=""
+  [ -n "$reset" ] && when=" ($(format_reset "$reset" "$now"))"
+  printf '%s %s%s' "$glyph" \
+    "$(format_paced_usage "$pct" "$reset" "$now" "$winsecs")" "$when"
+}
+
+# Join cells inside a single column. Only the five-hour column can hold more
+# than one reading, and only if the plan ever exposes a Codex 5h beside Spark's.
+row_join() {
+  local row="" c
+  for c in "$@"; do
+    [ -n "$c" ] || continue
+    if [ -n "$row" ]; then row="${row} ${SEP} ${c}"; else row=$c; fi
+  done
+  printf '%s' "$row"
+}
+
+# Visible width of a cell: color escapes occupy no columns, so they must not
+# be counted when measuring for alignment. Glyphs are assumed single-width,
+# the same assumption the workspace row already makes.
+vis_len() {
+  local bare
+  bare=$(printf '%s' "$1" | sed $'s/\x1b\\[[0-9;]*m//g')
+  printf '%s' "${#bare}"
+}
+
+# Render one provider row against the shared column widths in $colw. Cells are
+# padded to their column so the same window lands at the same offset on every
+# row. A column this provider has no window for is spanned by blanks, divider
+# included: the following cells stay in their column without an empty divider
+# implying a reading that does not exist. Padding stops at the row's last
+# populated cell, so a row that ends early carries no trailing dead space.
+render_row() {
+  local prefix=$1; shift
+  local cells=("$@")
+  local n=${#cells[@]} i last=-1 row="" cell pad len
+  for ((i = 0; i < n; i++)); do
+    [ -n "${cells[$i]}" ] && last=$i
+  done
+  [ "$last" -lt 0 ] && return
+  for ((i = 0; i <= last; i++)); do
+    [ "${colw[$i]}" -eq 0 ] && continue
+    cell=${cells[$i]}
+    if [ "$i" -eq "$last" ]; then
+      row="${row}${cell}"
+    elif [ -z "$cell" ]; then
+      row="${row}$(printf '%*s' "$(( colw[i] + 3 ))" '')"
+    else
+      len=$(vis_len "$cell")
+      pad=$(( colw[i] - len ))
+      [ "$pad" -gt 0 ] && cell="${cell}$(printf '%*s' "$pad" '')"
+      row="${row}${cell} ${SEP} "
+    fi
+  done
+  printf '%s%s' "$prefix" "$row"
+}
+
+# Rows 2-3 group by provider, one row each, so the same window sits in the same
+# column on both and a cross-provider comparison is a vertical glance. Claude's
+# windows come from the Claude Code payload, gap-filled from the omp usage
+# cache; the Codex windows are known only to that cache.
 
 # Collect the first limit for each Codex label, then render labels in a fixed
 # provider order. A limit whose scope cannot identify a 5h or 7d window never
@@ -381,16 +449,49 @@ if [ -n "${ocodex_recs:-}" ]; then
   done
 fi
 
-for cx_label in c5h c7d cs5h cs7d; do
-  case "$cx_label" in
-    c5h)  cx_pct=$c5h_pct;  cx_reset=$c5h_reset;  cx_winsecs=$c5h_winsecs ;;
-    c7d)  cx_pct=$c7d_pct;  cx_reset=$c7d_reset;  cx_winsecs=$c7d_winsecs ;;
-    cs5h) cx_pct=$cs5h_pct; cx_reset=$cs5h_reset; cx_winsecs=$cs5h_winsecs ;;
-    cs7d) cx_pct=$cs7d_pct; cx_reset=$cs7d_reset; cx_winsecs=$cs7d_winsecs ;;
-  esac
-  [ -n "$cx_pct" ] || continue
-  cache_append "${cx_label} $(format_paced_usage "$cx_pct" "$cx_reset" "$now" "$cx_winsecs")"
+# Width of the five-hour readings, so the percentages inside that column align
+# even before the column itself is padded: a fleet whose meters all read single
+# digits gets no dead space, and one reading 100% widens the rest to match.
+w5h=1
+for pct5h in "$rl_5h_pct" "$c5h_pct" "$cs5h_pct"; do
+  [ -n "$pct5h" ] && [ "${#pct5h}" -gt "$w5h" ] && w5h=${#pct5h}
 done
+
+# The columns, in order: five hours, the provider's own seven days, its variant
+# tier's seven days, then Sonnet. Every row supplies a cell for each column,
+# empty where that provider has no such window, so column N means the same
+# thing on every row.
+claude_cells=(
+  "$(cell_5h "$G_5H" "$rl_5h_pct" "$rl_5h_reset" "$w5h")"
+  "$(cell_7d "$G_7D" "$rl_7d_pct" "$rl_7d_reset")"
+  "$(cell_7d "${G_FABLE} ${G_7D}" "$ofb_pct" "$ofb_rst")"
+  "$(cell_7d "s${G_7D}" "$rl_s7d_pct" "$rl_s7d_reset")"
+)
+
+# Codex exposes no five-hour window of its own today, only Spark's, so the
+# five-hour column normally carries the Spark reading. A Codex 5h cell is
+# rendered ahead of it if one ever appears, rather than collected and dropped.
+codex_cells=(
+  "$(row_join \
+     "$(cell_5h "$G_5H" "$c5h_pct" "$c5h_reset" "$w5h")" \
+     "$(cell_5h "$G_SPARK5H" "$cs5h_pct" "$cs5h_reset" "$w5h")")"
+  "$(cell_7d "$G_7D" "$c7d_pct" "$c7d_reset" "$c7d_winsecs")"
+  "$(cell_7d "${G_SPARK} ${G_7D}" "$cs7d_pct" "$cs7d_reset" "$cs7d_winsecs")"
+  ""
+)
+
+# Column width is the widest cell any row puts in it. A column no row fills
+# collapses to zero and is skipped entirely rather than padded to nothing.
+colw=()
+for ci in "${!claude_cells[@]}"; do
+  cw=$(vis_len "${claude_cells[$ci]}")
+  cx=$(vis_len "${codex_cells[$ci]}")
+  [ "$cx" -gt "$cw" ] && cw=$cx
+  colw[$ci]=$cw
+done
+
+claude_row=$(render_row "${G_CLAUDE}  " "${claude_cells[@]}")
+codex_row=$(render_row "${G_CODEX}  " "${codex_cells[@]}")
 
 # Prepend short model name + optional effort to line 1.
 # display_name like "Opus 4.7 (1M context)" → first word ("Opus"); append ":<effort>" when present.
@@ -607,13 +708,11 @@ fi
 sid_part="| ${session_id}"
 
 # --- Workspace width check and buffered output ---
-# The cache row is a provenance split, not a terminal-width wrap: Claude Code's
-# payload carries no width, so the row exists exactly when the usage cache
-# contributed a window that the payload itself could not.
+# The split is by provider, not by terminal width: Claude Code's payload
+# carries no width. A provider with no known window contributes no row.
 quota_rows=$line1
-if [ -n "$cache_line" ]; then
-  quota_rows="${quota_rows}"$'\n'"$cache_line"
-fi
+[ -n "$claude_row" ] && quota_rows="${quota_rows}"$'\n'"$claude_row"
+[ -n "$codex_row" ] && quota_rows="${quota_rows}"$'\n'"$codex_row"
 
 total_len=$(( host_prefix_len + ${#ws_part} + 1 + ${#sid_part} ))
 
