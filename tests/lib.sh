@@ -118,14 +118,14 @@ line_n() {
 # Extract a quota row by its provider glyph. Rows are addressed by glyph, not
 # by index: a provider with no known window contributes no row at all, so row
 # positions shift with the fixture.
-G_CLAUDE_ROW=$'\ueeb1'
-G_CODEX_ROW=$'\U000f0c17'
-G_5H_T=$'\U000f01ce'
-G_SPARK5H_T=$'\U000f114e'
-G_7D_T=$'\ueab0'
-G_FABLE_T=$'\U000f0bfb'
-G_SPARK_T=$'\uec10'
-SEP_T=$'\u2502'
+G_CLAUDE_ROW=''
+G_CODEX_ROW='󰰗'
+G_5H_T='󰇎'
+G_SPARK5H_T='󱅎'
+G_7D_T=''
+G_FABLE_T='󰯻'
+G_SPARK_T=''
+SEP_T='│'
 provider_row() {
   local glyph="$1" out="$2"
   printf '%s' "$out" | grep -F "$glyph" | head -1

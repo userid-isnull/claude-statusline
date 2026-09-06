@@ -22,22 +22,23 @@ exec < <(printf '%s' "$__rl_payload")
 
 RST=$'\033[0m'
 BRANCH=$''
-WTREE=$'\uf07b'
+WTREE=''
 GRN=$'\033[32m'
 YEL=$'\033[33m'
 RED=$'\033[31m'
 MAG=$'\033[95m'
 
-# Provider and window glyphs for the two quota rows (nerd font). Points above
-# U+FFFF need \U with eight digits; \u takes exactly four.
-G_CLAUDE=$'\ueeb1'
-G_CODEX=$'\U000f0c17'
-G_5H=$'\U000f01ce'
-G_SPARK5H=$'\U000f114e'
-G_7D=$'\ueab0'
-G_FABLE=$'\U000f0bfb'
-G_SPARK=$'\uec10'
-SEP=$'\u2502'
+# Provider and window glyphs for the two quota rows (nerd font). Written as
+# literal UTF-8, not $'\uXXXX': macOS ships bash 3.2, which predates \u and
+# would print the escape text verbatim. tests/lib.sh mirrors these.
+G_CLAUDE=''
+G_CODEX='󰰗'
+G_5H='󰇎'
+G_SPARK5H='󱅎'
+G_7D=''
+G_FABLE='󰯻'
+G_SPARK=''
+SEP='│'
 
 # Now-epoch resolution: env override (deterministic tests) or system clock.
 now=${STATUSLINE_NOW_EPOCH:-$(date +%s)}
