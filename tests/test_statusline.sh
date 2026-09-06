@@ -337,4 +337,10 @@ line2=$(line_n 1 "$out")
 stripped=$(printf '%s' "$line2" | strip_ansi)
 assert_match "${ssh_user}@${ssh_host}" "$stripped"
 
+# macOS ships bash 3.2, which predates $'\uXXXX' and prints the escape text
+# verbatim instead of the glyph. Glyphs must therefore be literal UTF-8.
+start_test "no \\u escapes in shipped sources (bash 3.2 prints them literally)"
+found=$(grep -n "=\$'\\\\[uU]" "$STATUSLINE" "$(dirname "$STATUSLINE")/tests/lib.sh" || true)
+assert_eq "" "$found"
+
 test_summary
